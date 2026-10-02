@@ -2,6 +2,7 @@ import { db } from './db.js'
 import { now, addTimeline } from './pipeline.js'
 import { ROLE_TEXT } from './notify.js'
 import { deliveryRollup, crisisDispatchSummary } from './dispatch.js'
+import { crisisExternalSnapshot } from './external.js'
 
 const q = (sql, ...p) => db.prepare(sql).all(...p)
 const q1 = (sql, ...p) => db.prepare(sql).get(...p)
@@ -151,13 +152,16 @@ export function buildSnapshot(crisisId) {
     })
   }
 
+  // ---- 外部协作反馈：品牌方/监管方/媒体提交的证据·整改·问询受理与审核采纳情况（与外部协作看板同口径） ----
+  const external = crisisExternalSnapshot(crisisId)
+
   return {
     generatedAt: now(),
     crisis: {
       id: c.id, title: c.title, level: c.level, status: c.status, topic: c.topic,
       keyword: c.keyword, origin: c.origin, created: c.created, updated: c.updated
     },
-    alerts, timeline, propagation, workOrders, notifications, closures, statements
+    alerts, timeline, propagation, workOrders, notifications, closures, statements, external
   }
 }
 

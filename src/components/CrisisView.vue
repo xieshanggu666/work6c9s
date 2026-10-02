@@ -42,6 +42,9 @@
           <span v-if="c.statement" class="stmt-badge" :class="c.statement.status" @click="gotoStmt(c)" title="查看危机声明">
             📢 {{ c.statement.statusText }}
           </span>
+          <span v-if="c.external && c.external.total" class="ext-badge" :class="{urg: c.external.urgent, open: c.external.open}" @click="gotoExternal(c)" title="查看外部协作反馈（品牌方/监管方/媒体）">
+            🤝 外部协作 {{ c.external.open ? c.external.open+' 待办 / ' : '' }}{{ c.external.total }}<template v-if="c.external.urgent"> · 🚨紧急 {{ c.external.urgent }}</template>
+          </span>
           <span class="st" :class="c.status">{{ stText(c.status) }}</span>
           <button class="del" @click="del(c)">✕</button>
         </div>
@@ -72,10 +75,11 @@
           <h5>🕒 处置时间线</h5>
           <div class="tl">
             <div v-for="(t,i) in c.timeline" :key="t.id" class="tl-item">
-              <span class="tl-dot" :class="{latest:i===0, linked:t.ref_type==='workorder'}"></span>
+              <span class="tl-dot" :class="{latest:i===0, linked:['workorder','external'].includes(t.ref_type)}"></span>
               <div class="tl-body">
                 <b>{{ t.action }}
                   <span v-if="t.ref_type==='workorder'" class="tl-link" @click.stop="openTimelineWorkOrder(t)">📋 #{{ t.ref_id }} →</span>
+                  <span v-else-if="t.ref_type==='external'" class="tl-link ext" @click.stop="openTimelineExternal(t)">🤝 受理单 #{{ t.ref_id }} →</span>
                 </b>
                 <span>{{ t.note }}</span>
                 <em>{{ t.time }}</em>
@@ -230,7 +234,7 @@ async function reopen(c) {
   await store.reopenCrisis(c.id, note)
   if (reviewId.value === c.id) review.value = await store.fetchCrisisReview(c.id) // 刷新回溯（结案档案/未解除计数）
 }
-function kindText(k) { return { manual: '手动解除', batch: '批量解除', close: '结案联动', notify: '通知回执', workorder: '工单联动' }[k] || k }
+function kindText(k) { return { manual: '手动解除', batch: '批量解除', close: '结案联动', notify: '通知回执', workorder: '工单联动', external: '外部采纳联动' }[k] || k }
 async function del(c) {
   if (confirm(`删除危机「${c.title}」？`)) await store.delCrisis(c.id)
 }
@@ -240,11 +244,23 @@ function gotoWorkOrder(c) {
   store.woFilterCrisis = c.id
   store.tab = 'work'
 }
+// 跳转外部协作反馈门户工作台（按该危机过滤）
+function gotoExternal(c) {
+  store.extCrisisFilter = c.id
+  store.extOpenId = null
+  store.tab = 'ext'
+}
 // 从时间线条目跳转（携带该条目的危机过滤，并自动展开工单调度链路）
 function openTimelineWorkOrder(t) {
   store.woFilterCrisis = t.crisis_id
   store.woOpenId = t.ref_id
   store.tab = 'work'
+}
+// 从时间线外部协作锚点跳转受理单工作台（按危机过滤并高亮受理单）
+function openTimelineExternal(t) {
+  store.extCrisisFilter = t.crisis_id
+  store.extOpenId = t.ref_id
+  store.tab = 'ext'
 }
 function dispatchClass(d) {
   if (d.woEscalated || d.escalated || d.failed) return 'warn'
@@ -294,6 +310,9 @@ textarea{resize:vertical;min-height:52px;}
 .stmt-badge.publishing{background:#08303a;color:#80deea;border-color:rgba(38,198,218,.5);}
 .stmt-badge.published{background:#122e1c;color:#a5d6a7;border-color:rgba(102,187,106,.4);}
 .stmt-badge.draft{background:#263238;color:#b0bec5;border-color:rgba(120,144,156,.4);}
+.ext-badge{font-size:10px;padding:2px 8px;border-radius:6px;background:#1a2350;color:#c5cae9;border:1px solid rgba(124,134,226,.45);cursor:pointer;}
+.ext-badge.open{background:#33270e;color:#ffe082;border-color:rgba(255,179,0,.5);}
+.ext-badge.urgent{background:#4a1518;color:#ef9a9a;border-color:rgba(239,83,80,.55);font-weight:600;}
 .st{font-size:11px;padding:2px 10px;border-radius:6px;}
 .st.monitoring{background:#37474f;color:#b0bec5;}.st.disposal{background:#b71c1c;color:#ffcdd2;}.st.closed{background:#1b5e20;color:#a5d6a7;}
 .del{background:none;border:none;color:#ef5350;font-size:15px;cursor:pointer;}
@@ -318,6 +337,8 @@ h5{margin:0 0 8px;color:#ffd54f;font-size:12px;}
 .tl-dot.linked{background:#26a69a;box-shadow:0 0 0 3px rgba(38,166,154,.15);}
 .tl-link{font-size:10px;font-weight:400;color:#80cbc4;background:#0c2622;border:1px solid rgba(38,166,154,.35);border-radius:5px;padding:0 6px;margin-left:6px;cursor:pointer;}
 .tl-link:hover{background:#10433d;}
+.tl-link.ext{color:#c5cae9;background:#171e47;border-color:rgba(124,134,226,.45);}
+.tl-link.ext:hover{background:#232c63;}
 .tl-body b{color:#dbe4f3;font-size:12px;display:block;}
 .tl-body span{color:#8ba2c8;font-size:11px;}
 .tl-body em{color:#5b6f94;font-size:10px;font-style:normal;display:block;margin-top:2px;}

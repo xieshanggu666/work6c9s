@@ -23,6 +23,7 @@
       <CrisisView v-else-if="tab==='crisis'" />
       <StatementsView v-else-if="tab==='stmt'" />
       <WorkOrderView v-else-if="tab==='work'" />
+      <ExternalView v-else-if="tab==='ext'" />
       <ReportsView v-else-if="tab==='report'" />
       <NotifyView v-else-if="tab==='notify'" />
     </main>
@@ -44,6 +45,7 @@ import PropagationView from '@/components/PropagationView.vue'
 import CrisisView from '@/components/CrisisView.vue'
 import StatementsView from '@/components/StatementsView.vue'
 import WorkOrderView from '@/components/WorkOrderView.vue'
+import ExternalView from '@/components/ExternalView.vue'
 import ReportsView from '@/components/ReportsView.vue'
 import NotifyView from '@/components/NotifyView.vue'
 
@@ -59,6 +61,7 @@ const tabs = [
   { key: 'crisis', icon: '🛟', label: '危机处置' },
   { key: 'stmt', icon: '📢', label: '危机声明', badge: () => (store.stats.stmtReview || 0) + (store.stats.stmtChannelFailed || 0) },
   { key: 'work', icon: '📋', label: '协同工单', badge: () => store.stats.workOpen || 0 },
+  { key: 'ext', icon: '🤝', label: '外部协作', badge: () => store.stats.extOpen || 0 },
   { key: 'report', icon: '📝', label: '复盘报告', badge: () => store.stats.reportReviewing || 0 },
   { key: 'notify', icon: '🔔', label: '通知中心', badge: () => store.stats.notifyOpen || 0 }
 ]

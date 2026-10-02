@@ -51,8 +51,8 @@ function addLog(taskId, action, detail, operator = '系统') {
 }
 
 // ===== 任务生成（订阅匹配 → 多渠道并行任务；幂等键去重，重复触发不产生重复任务） =====
-// opts.kind: alert（预警）/ crisis（危机状态）/ workorder（协同工单事件）/ prop（传播路径事件）
-function createTasks(sub, { kind, alertEventId = null, crisisId = null, statusKey = '', woId = null, woEvent = '', propPathId = null, idemTag = '', corrId = '', corrSeq = 0, title, content }) {
+// opts.kind: alert（预警）/ crisis（危机状态）/ workorder（协同工单事件）/ prop（传播路径事件）/ external（外部协作提交）
+function createTasks(sub, { kind, alertEventId = null, crisisId = null, statusKey = '', woId = null, woEvent = '', propPathId = null, extSubmissionId = null, idemTag = '', corrId = '', corrSeq = 0, title, content }) {
   const created = []
   const ts = now()
   for (const chId of subChannels(sub)) {
@@ -61,14 +61,15 @@ function createTasks(sub, { kind, alertEventId = null, crisisId = null, statusKe
     const src = kind === 'alert' ? `alert:${alertEventId}`
       : kind === 'workorder' ? `wo:${woId}:${idemTag || woEvent}`
       : kind === 'prop' ? `prop:${propPathId}:${idemTag}`
+      : kind === 'external' ? `ext:${extSubmissionId}:${idemTag}`
       : `crisis:${crisisId}:${statusKey}`
     const r = run(`INSERT OR IGNORE INTO notify_tasks
-      (idem_key,sub_id,channel_id,alert_event_id,crisis_id,kind,title,content,status,attempts,max_attempts,require_ack,work_order_id,wo_event,prop_path_id,corr_id,seq,created,updated)
-      VALUES (?,?,?,?,?,?,?,?,'pending',0,?,?,?,?,?,?,?,?,?)`,
+      (idem_key,sub_id,channel_id,alert_event_id,crisis_id,kind,title,content,status,attempts,max_attempts,require_ack,work_order_id,wo_event,prop_path_id,ext_submission_id,corr_id,seq,created,updated)
+      VALUES (?,?,?,?,?,?,?,?,'pending',0,?,?,?,?,?,?,?,?,?,?)`,
       `${src}:sub${sub.id}:ch${chId}`, sub.id, chId, alertEventId, crisisId,
       kind === 'workorder' ? 'workorder' : kind, title, content,
       Math.max(1, sub.max_retry || 3), sub.require_ack ? 1 : 0, woId,
-      woEvent === '' || woEvent == null ? '' : String(woEvent), propPathId,
+      woEvent === '' || woEvent == null ? '' : String(woEvent), propPathId, extSubmissionId,
       corrId || '', corrSeq, ts, ts)
     if (Number(r.changes)) {
       const id = Number(r.lastInsertRowid)
@@ -196,6 +197,55 @@ export function seedPropNotifyTasks() {
   let n = 0
   for (const p of q("SELECT id FROM prop_paths WHERE status='active' AND stage='outbreak'")) {
     n += generateForPropEvent(p.id, 'outbreak').length
+  }
+  return n
+}
+
+// ===== 外部协作反馈门户事件 → 通知任务（ext_event：new 新提交待审 / escalate 监管紧急升级） =====
+// 复用通知渠道、失败退避重试、回执与升级调度；幂等键按 提交×事件×订阅×渠道 去重。
+export const EXT_EVENT_TEXT = { new: '外部提交待审核', escalate: '监管紧急升级' }
+export function generateForExternal(submissionId, extEvent = 'new') {
+  const s = q1(`SELECT s.*, c.title crisis_title FROM ext_submissions s
+    LEFT JOIN crisis c ON c.id=s.crisis_id WHERE s.id=?`, submissionId)
+  if (!s) return []
+  const all = []
+  const subs = q(`SELECT * FROM notify_subs WHERE active=1 AND ext_event=?`, extEvent)
+  if (!subs.length) return []
+  const party = { brand: '品牌方', regulator: '监管方', media: '媒体' }[s.party_type] || s.party_type
+  const kindName = { evidence: '证据材料', rectification: '整改进度', inquiry: '媒体问询', directive: '监管整改通知' }[s.kind] || s.kind
+  const title = extEvent === 'escalate'
+    ? `【监管紧急升级】${s.title}`
+    : `【外部协作·${party}】${s.title}`
+  const bits = [`类型：${kindName}`, `提交方：${s.org_name || '访客'}`]
+  if (s.crisis_title) bits.push(`关联危机「${s.crisis_title}」`)
+  if (s.priority === 'urgent') bits.push('紧急件')
+  bits.push(`受理编号 ${s.code}`)
+  const content = bits.join(' · ')
+  for (const sub of subs) {
+    all.push(...createTasks(sub, {
+      kind: 'external', extSubmissionId: s.id, crisisId: s.crisis_id,
+      idemTag: extEvent, corrId: `ext${s.id}:${extEvent}`, corrSeq: extEvent === 'escalate' ? 1 : 0, title, content
+    }))
+  }
+  return all
+}
+
+// 启动时为存量待审核外部提交补生成通知任务（幂等：重复启动不产生重复任务）
+export function seedExternalNotifyTasks() {
+  let n = 0
+  for (const s of q("SELECT * FROM ext_submissions WHERE status IN ('pending','reviewing')")) {
+    n += generateForExternal(s.id, 'new').length
+    // 监管紧急件补齐升级链（幂等键去重）；仅首次补生成时回写升级标记，避免重复留痕
+    if (s.party_type === 'regulator' && s.priority === 'urgent') {
+      const made = generateForExternal(s.id, 'escalate').length
+      n += made
+      if (made && !s.escalated) {
+        run('UPDATE ext_submissions SET escalated=1 WHERE id=?', s.id)
+        run(`INSERT INTO ext_submission_logs (submission_id,action,detail,operator,operator_side,time)
+          VALUES (?, 'escalate', '监管方紧急整改通知：自动联动通知升级（升级专线 + 回执超时升级）', '系统', 'internal', ?)`,
+          s.id, now())
+      }
+    }
   }
   return n
 }
@@ -432,7 +482,9 @@ export function validateSub(b) {
   if (we && !['created', 'escalated'].includes(we)) return '工单事件无效（created/escalated）'
   const pe = String(b.prop_event || '')
   if (pe && !['outbreak', 'surge'].includes(pe)) return '传播事件无效（outbreak/surge）'
-  if ((we && cs) || (we && pe) || (cs && pe)) return '预警/危机/工单/传播事件订阅互斥，请只选一种匹配方式'
+  const ee = String(b.ext_event || '')
+  if (ee && !['new', 'escalate'].includes(ee)) return '外部协作事件无效（new/escalate）'
+  if ((we && cs) || (we && pe) || (cs && pe) || (we && ee) || (cs && ee) || (pe && ee)) return '预警/危机/工单/传播/外部事件订阅互斥，请只选一种匹配方式'
   const chs = Array.isArray(b.channel_ids) ? b.channel_ids.map(Number).filter(Number.isInteger) : []
   if (!chs.length) return '至少选择一个通知渠道'
   for (const id of chs) if (!q1('SELECT 1 FROM notify_channels WHERE id=?', id)) return `渠道 #${id} 不存在`

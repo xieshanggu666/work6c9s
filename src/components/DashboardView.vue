@@ -14,6 +14,7 @@
       <div class="stat notify"><span class="s-ic">📤</span><b>{{ s.notifyAcked ?? 0 }}</b><em>通知已回执{{ s.notifyOpen ? `（在途 ${s.notifyOpen}）` : '' }}</em></div>
       <div v-if="s.notifyRetries || s.notifyEscalated || s.workDispatchStalled" class="stat notify-warn"><span class="s-ic">🔗</span><b>{{ (s.notifyRetries ?? 0) + (s.notifyEscalated ?? 0) }}</b><em>调度重试/升级{{ s.workDispatchStalled ? ` · ${s.workDispatchStalled} 单发送失败` : '' }}</em></div>
       <div class="stat stmt"><span class="s-ic">📢</span><b>{{ (s.stmtReview ?? 0) + (s.stmtPublishing ?? 0) }}</b><em>待办声明{{ s.stmtChannelFailed ? `（${s.stmtChannelFailed} 渠道失败）` : '' }}</em></div>
+      <div class="stat ext" :class="{urg: s.extUrgent}"><span class="s-ic">🤝</span><b>{{ s.extOpen ?? 0 }}</b><em>外部协作待办{{ s.extUrgent ? `（紧急 ${s.extUrgent}）` : '' }}{{ s.extEscalated ? ` · 已升级 ${s.extEscalated}` : '' }}</em></div>
       <div class="stat prop"><span class="s-ic">🕸</span><b>{{ s.propActive ?? 0 }}</b><em>监测传播路径</em></div>
       <div class="stat prop-out"><span class="s-ic">🔥</span><b>{{ s.propOutbreak ?? 0 }}</b><em>爆发期路径</em></div>
       <div class="stat report"><span class="s-ic">📝</span><b>{{ s.reportPublished ?? 0 }}</b><em>已发布复盘报告</em></div>
@@ -110,6 +111,20 @@
         </div>
         <div v-if="!propPaths.length" class="none">暂无传播路径（在「传播路径」页建档并记录转发关系）</div>
       </div>
+
+      <!-- 外部协作速览 -->
+      <div class="card wide">
+        <h4>🤝 外部协作反馈速览（品牌方 / 监管方 / 媒体）</h4>
+        <div v-if="!extItems.length" class="none">暂无外部协作受理单（在「外部协作」页查看门户提交与审核工作台）</div>
+        <div class="ext-row" v-for="e in extItems" :key="e.id">
+          <span class="e-party">{{ iconOf(e.party_type) }} {{ e.partyText }}</span>
+          <span class="e-kind">{{ e.kindText }}</span>
+          <span class="e-title">{{ e.title }}<i class="e-org">{{ e.org_name }}</i></span>
+          <span v-if="e.priority==='urgent'" class="e-urg">🚨 紧急</span>
+          <span class="e-status" :class="e.status">{{ e.statusText }}</span>
+          <span class="e-code">{{ e.code }}</span>
+        </div>
+      </div>
     </div>
   </div>
 </template>
@@ -125,12 +140,17 @@ const trend = computed(() => store.trend)
 const activeAlerts = computed(() => store.activeAlerts)
 const crises = computed(() => store.crises)
 const propPaths = ref([])
+const extItems = ref([])
 function stageText(x) { return { seed: '潜伏期', ferment: '发酵期', outbreak: '爆发期', decline: '回落期' }[x] || x }
+function iconOf(t) { return ({ brand: '🏪', regulator: '⚖️', media: '📰' })[t] || '📨' }
 async function loadProp() {
   try { propPaths.value = (await store.fetchProp()).items.slice(0, 6) } catch { /* 后端未就绪 */ }
 }
+async function loadExt() {
+  try { extItems.value = (await store.fetchExternal({})).items.slice(0, 6) } catch { /* 后端未就绪 */ }
+}
 let timer = null
-onMounted(() => { loadProp(); timer = setInterval(loadProp, 6000) })
+onMounted(() => { loadProp(); loadExt(); timer = setInterval(() => { loadProp(); loadExt() }, 6000) })
 onUnmounted(() => clearInterval(timer))
 
 const cir = 2 * Math.PI * 48
@@ -168,6 +188,7 @@ function statusText(st) { return { monitoring: '监测中', disposal: '处置中
 .stat.alarm b{color:#ffab91;}.stat.crisis b{color:#90caf9;}.stat.wo b{color:#80cbc4;}.stat.stmt b{color:#4dd0e1;}
 .stat.notify b{color:#a5d6a7;}.stat.notify-warn b{color:#ffcc80;}
 .stat.prop b{color:#80cbc4;}.stat.prop-out b{color:#ef5350;}
+.stat.ext b{color:#c5cae9;}.stat.ext.urg b{color:#ef9a9a;}
 .stat.report b{color:#ce93d8;}.stat.report-rev b{color:#ffcc80;}
 .grid{display:grid;grid-template-columns:repeat(2,1fr);gap:16px;}
 @media(max-width:860px){.grid{grid-template-columns:1fr;}}
@@ -218,5 +239,17 @@ h4{margin:0 0 12px;color:#fff;font-size:14px;}
 .p-stat{font-size:11px;color:#8ba2c8;}
 .p-stat.hot{color:#ef9a9a;font-weight:700;}
 .p-wo{font-size:10px;color:#81c784;background:#12261a;border-radius:5px;padding:1px 7px;}
+.ext-row{display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px dashed rgba(120,160,220,0.1);font-size:12px;}
+.ext-row:last-child{border-bottom:none;}
+.e-party{font-size:10px;font-weight:700;color:#c5cae9;background:#1a2350;border-radius:5px;padding:2px 8px;flex:none;}
+.e-kind{font-size:10px;color:#8ba2c8;background:#16263f;border-radius:5px;padding:2px 7px;flex:none;}
+.e-title{color:#dbe4f3;flex:1;min-width:160px;}
+.e-org{font-style:normal;font-size:10px;color:#5b6f94;margin-left:7px;}
+.e-urg{font-size:10px;color:#ef9a9a;font-weight:700;flex:none;}
+.e-status{font-size:10px;padding:2px 8px;border-radius:6px;flex:none;}
+.e-status.pending{background:#33270e;color:#ffe082;}.e-status.reviewing{background:#0d2137;color:#90caf9;}
+.e-status.approved{background:#1b5e20;color:#a5d6a7;}.e-status.rejected{background:#3e1f14;color:#ffab91;}
+.e-status.closed{background:#263238;color:#90a4ae;}
+.e-code{font-size:9px;color:#9fa8da;font-family:monospace;}
 .none{color:#5b6f94;text-align:center;padding:20px;}
 </style>

@@ -11,7 +11,7 @@
       </div>
       <span class="me">👤 {{ store.user.name }} · {{ roleText(store.user.role) }}</span>
     </div>
-    <p class="hint">🔗 复盘报告汇总<b>预警、处置时间线、传播路径、协同工单、危机声明、通知回执</b>同源快照；支持跨角色分段编制 → 提交审核 → 审核发布（驳回可重编），每次送审/发布/回滚均归档不可变版本，已发布版本可一键回滚；审核通过自动回写结案档案与统计口径。</p>
+    <p class="hint">🔗 复盘报告汇总<b>预警、处置时间线、传播路径、协同工单、危机声明、外部协作反馈、通知回执</b>同源快照；支持跨角色分段编制 → 提交审核 → 审核发布（驳回可重编），每次送审/发布/回滚均归档不可变版本，已发布版本可一键回滚；审核通过自动回写结案档案与统计口径。</p>
 
     <!-- 创建报告 -->
     <form v-if="showForm" class="rp-form" @submit.prevent="create">
@@ -179,6 +179,21 @@
               </div>
             </section>
 
+            <!-- 外部协作反馈（品牌方/监管方/媒体证据·整改·问询，审核采纳回写口径） -->
+            <section class="snap-sec">
+              <h5>🤝 外部协作反馈（{{ (snap.external && snap.external.total) || 0 }} 件 · 在办 {{ (snap.external && snap.external.open) || 0 }} · 已采纳 {{ (snap.external && snap.external.approved) || 0 }}<template v-if="snap.external && snap.external.urgent"> · 紧急 {{ snap.external.urgent }}</template>）</h5>
+              <div v-if="!snap.external || !snap.external.total" class="snap-empty">该事件暂无外部协作受理单</div>
+              <div class="snap-list">
+                <div v-for="e in (snap.external && snap.external.items) || []" :key="e.id" class="snap-item ext">
+                  <span class="ext-dot" :class="e.party_type"></span>
+                  <b>{{ e.title }}</b>
+                  <span>{{ e.org_name }} · {{ extPartyText(e.party_type) }} · {{ extKindText(e.kind) }}<template v-if="e.work_order_id"> · 📋 工单 #{{ e.work_order_id }}</template><template v-if="e.escalated"> · 🚨 已联动升级</template></span>
+                  <i class="tag" :class="'extst-'+e.status">{{ extStatusText(e.status) }}</i>
+                  <em>{{ e.code }} · {{ e.created }}</em>
+                </div>
+              </div>
+            </section>
+
             <!-- 通知回执（与危机看板/工单调度链路同口径） -->
             <section class="snap-sec">
               <h5>🔔 通知与回执（{{ snap.notifications.total }} 条 · 已回执 {{ snap.notifications.acked }} · 已升级 {{ snap.notifications.escalated }}<template v-if="snap.notifications.retries"> · 自动重试 {{ snap.notifications.retries }}</template>）</h5>
@@ -297,6 +312,9 @@ function logText(a) {
 function kindText(k) { return { manual: '手动解除', batch: '批量解除', close: '结案联动', notify: '通知回执', workorder: '工单联动' }[k] || k || '已解除' }
 function stmtStatusText(x) { return { draft: '起草中', review: '待法务审核', approved: '审核通过', publishing: '发布中', published: '已发布', cancelled: '已取消' }[x] || x }
 function stmtChText(x) { return { pending: '待执行', publishing: '执行中', success: '已发布', failed: '失败', cancelled: '已取消' }[x] || x }
+function extPartyText(x) { return { brand: '品牌方', regulator: '监管方', media: '媒体' }[x] || x }
+function extKindText(x) { return { evidence: '证据材料', rectification: '整改进度', inquiry: '媒体问询', directive: '监管整改通知' }[x] || x }
+function extStatusText(x) { return { pending: '待审核', reviewing: '审核中', approved: '已采纳', rejected: '已退回', closed: '已关闭' }[x] || x }
 function formatNum(n) { return n >= 10000 ? (n / 10000).toFixed(1) + ' 万' : String(n || 0) }
 function hasReport(crisisId) { return items.value.some((r) => r.crisis_id === crisisId) }
 
@@ -530,6 +548,10 @@ input,select,textarea,button{font-family:inherit;}
 .nt-pill.failed{color:#ffab91;border-color:rgba(255,138,101,.4);}
 .nt-dot{width:7px;height:7px;border-radius:50%;flex:none;background:#78909c;}
 .nt-dot.acked{background:#66bb6a;}.nt-dot.escalated{background:#ef5350;}.nt-dot.failed{background:#ff9800;}
+.ext-dot{width:7px;height:7px;border-radius:50%;flex:none;background:#5c6bc0;}
+.ext-dot.regulator{background:#ab47bc;}.ext-dot.media{background:#26a69a;}
+.tag.extst-pending{background:#33270e;color:#ffe082;}.tag.extst-reviewing{background:#0d2137;color:#90caf9;}
+.tag.extst-approved,.tag.extst-closed{background:#1b5e20;color:#a5d6a7;}.tag.extst-rejected{background:#3e1f14;color:#ffab91;}
 .ack{color:#a5d6a7;}
 .closure-snap{background:#0c1730;border-left:3px solid #66bb6a;border-radius:7px;padding:8px 11px;font-size:11px;display:flex;flex-direction:column;gap:2px;margin-bottom:6px;}
 .closure-snap.rolled{border-left-color:#ffb300;opacity:.85;}

@@ -29,6 +29,7 @@ npm run dev
 - **通知中心**：多渠道订阅与通知编排——按预警规则/话题/危机状态/**协同工单事件（拆分分派/改派/认领/超时升级）/传播路径事件（爆发升级/异动激增·KOL）**生成**可暂停**的通知任务，调度器自动发送、失败退避重试、回执超时自动升级；同一分派/升级的多渠道任务以 `corr_id`+`seq` 串联为可追踪链路，全部动作镜像关联工单日志并实时聚合为工单链路状态；确认回执**同步解除关联预警并写入带工单锚点的危机时间线**；覆盖渠道与订阅配置、调度、角色权限与全程历史追踪
 - **危机复盘报告**：汇总**预警、处置时间线、传播路径、协同工单、危机声明、通知回执、结案档案**同源快照，支持**跨角色分段编制**（六章节各自记录最后编辑人）→ 提交审核 → 审核发布（驳回可重编）；每次送审/发布/回滚均**归档不可变版本**，支持**版本对比与一键回滚重编**；审核通过自动**回写结案档案与统计口径**，结案回滚联动撤销回写
 - **危机声明**：公关**起草危机声明**（标题/正文/优先级/拟发布渠道，可关联处置工单）→ 提交**法务审核**（通过/驳回，驳回退回起草可修改重送）→ 审核通过后**发起分渠道发布**（官方微博/微信公众号/官网/新闻通稿/短视频/新闻发布会），发布人员**分渠道执行并逐条登记结果**（执行中/已发布+回执链接/失败原因，失败可重试、可取消单渠道）；起草/送审/审核/每个渠道进度**实时回写处置工单日志与危机统一时间线**，全部渠道登记完成自动置发布完成，**未完结声明阻塞危机结案**
+- **外部协作反馈门户**：**品牌方/监管方/媒体**通过对外门户凭**访问码**提交**证据材料/整改进度/媒体问询/监管整改通知**（访客亦可直发），内部值班员**受理**→管理员**审核采纳/退回补正**→采纳时按勾选项**回写协同工单（自动拆分/挂接）、联动解除预警（resolve_kind=external）、写入危机统一时间线（external 锚点可直达）**并可直接**官方回复**；**监管方紧急整改通知自动联动通知升级**（监管升级专线 + 回执超时升级），退回件外部可凭受理编号+访问码**补充材料自动重新进入待审核**；联络方名录（机构+访问码）由管理员维护，受理状态/审核意见/官方回复/办理进度对外部门户可见，全程内外留痕并进入复盘快照
 
 ## 危机声明（起草 → 法务审核 → 分渠道发布登记）
 
@@ -40,6 +41,18 @@ npm run dev
 - **权限模型**（演示，与其他模块一致）：`viewer` 只读；`ops` 值班员（公关/发布角色）可起草·编辑·送审·发起发布·渠道执行登记·重试·取消；`admin` 管理员同 ops 且独占**法务审核通过/驳回**（可切换身份至法务「陈律」）；越权 403、越态 400
 - **复盘衔接**：复盘报告聚合快照新增「危机声明」章节（每份声明的审核状态、法务意见、关联工单、分渠道执行结果）
 - 主要接口：`GET /api/statements`（状态/危机过滤 + 看板汇总 + 字典）、`POST /api/statements`、`GET /api/statements/:id`（含分渠道登记与留痕）、`PUT /api/statements/:id`、`POST /api/statements/:id/{submit|approve|reject|publish|cancel}`、`POST /api/statement-channels/:chId/{register|retry|cancel}`
+
+## 外部协作反馈门户（品牌方/监管方/媒体 → 内部审核 → 回写闭环 → 通知升级）
+
+- **联络方名录**（admin）：维护品牌方/监管方/媒体机构（`ext_contacts`），系统发放唯一**访问码**（`BR-xxxxxx/REG-xxxxxx/MED-xxxxxx`，可重置、可停用）；外部凭码提交时自动继承机构身份并可查询名下受理单，无码可作访客直发；删除名录不删除历史受理单（机构信息以快照保留）
+- **门户提交**（公开接口，无需内部身份）：`POST /api/ext/submissions` 提交四类内容——证据材料 `evidence` / 整改进度 `rectification` / 媒体问询 `inquiry` / 监管整改通知 `directive`，生成顺序受理编号 `EXT-YYYYMMDD-XXXX`（同日序号自动跳过占用）；可带证据说明与材料链接、联系人、关联危机；**监管方的整改通知默认紧急**，提交即写 `ext_submission_logs`（标注外部操作方）
+- **内部审核状态机**：`pending 待审核 → reviewing 审核中 → approved 已采纳 / rejected 已退回`（采纳/退回/办结后可 `closed 已关闭`）；值班员 ops **受理**，管理员 admin 独占**审核采纳/退回**，ops/admin 可**官方回复/关闭**，viewer 只读，越权 403、越态 400
+- **审核采纳三处回写**（事务化）：① **协同工单**——可自动拆分（类别/优先级/SLA/指派人按件类型预填）或挂接既有工单，并向 `work_order_logs` 写入 `external` 回写日志；② **预警状态**——勾选后联动解除该危机全部未解除预警（`resolve_kind='external'`，状态守卫幂等）；③ **危机统一时间线**——按类型写「外部整改反馈/监管整改通知/媒体问询/外部证据提交」，`crisis_timeline.ref_type='external'` 带受理单锚点，危机卡片可一键直达；退回/关闭同样写时间线
+- **联动通知升级**：新提交按 `notify_subs.ext_event='new'` 订阅幂等生成待办通知（`notify_tasks.kind='external'`，`corr_id=ext{id}:new`）；**监管方紧急件**额外按 `ext_event='escalate'` 触达监管升级专线（需回执、1 分钟回执超时自动再升级），`corr_id=ext{id}:escalate` 串联多渠道链路，受理单置 `escalated=1`；回执确认写入危机时间线；启动时为存量待审件补生成（幂等键去重）
+- **对外进度透明**：`GET /api/ext/track?code=&access_code=` 仅返回对外字段（状态/审核意见/官方回复/分内外侧的办理时间线）；`POST /api/ext/supplement` 供外部补充材料——**退回件补充后自动重新进入待审核**并再次触发待办通知；访问码与受理单归属机构不一致时拒绝查询/补充
+- **危机删除守卫**：删除危机时外部受理单**保留**（对外承诺与监管留痕），仅解除危机引用；复盘报告聚合快照新增「外部协作反馈」章节（按状态/提交方/紧急件/关联工单统计 + 逐件明细）；总览统计与页签角标新增待办/紧急/已升级口径
+- 主要接口：门户 `POST /api/ext/submissions`、`POST /api/ext/supplement`、`GET /api/ext/track`；内部 `GET /api/ext/overview`、`GET /api/ext/submissions/:id`、`POST /api/ext/submissions/:id/{receive|approve|reject|reply|close}`；名录 `GET/POST /api/ext/contacts`、`PUT /api/ext/contacts/:id`、`POST /api/ext/contacts/:id/{toggle|reset-code}`、`DELETE /api/ext/contacts/:id`
+- 演示访问码：监管方 `REG-8801`（市市场监督管理局食品经营处，种子紧急整改通知待审核）、品牌方 `BR-2046`（涉事门店加盟商，种子整改证据已采纳闭环）、媒体 `MED-6107`（澎湃新闻消费调查部，种子问询审核中）
 
 ## 跨角色危机协同工单
 - **统一调度链路（dispatch chain）**：分派/改派/认领、SLA 超时一级/二级升级、通知发送、失败自动/手动重试、回执确认与回执超时升级共享同一套可追踪状态流——同一次分派/升级的多渠道通知任务共享 `notify_tasks.corr_id`（`wo{id}:dispatch`/`wo{id}:escalate`）并以 `seq` 标识调度轮次（改派、逐级升级递增）；通知侧每一步动作（生成/送达/重试/失败/暂停/回执/升级/取消）实时**镜像进工单日志**（`work_order_logs.notify_task_id`），工单详情「🔗 调度链路」把工单动作与通知留痕按时间归并展示；工单持有聚合后的链路状态 `dispatch_state`（未触发/发送中/发送失败/部分渠道送达/已送达/已回执/已取消）
@@ -83,7 +96,7 @@ npm run dev
 
 ## 通知中心（多渠道订阅与通知编排）
 
-- **订阅编排**：订阅按「预警规则 + 话题 + 级别」匹配预警触发，或按「危机状态流转」（监测中/处置中/已结案）匹配事件，或按「协同工单事件」（`wo_event`：拆分分派 created / 超时升级 escalated）匹配工单，或按「传播路径事件」（`prop_event`：爆发升级 outbreak / 异动激增·KOL 加入 surge）匹配传播路径；一条订阅可并发出推到多个渠道（Webhook/邮件/短信/站内信）
+- **订阅编排**：订阅按「预警规则 + 话题 + 级别」匹配预警触发，或按「危机状态流转」（监测中/处置中/已结案）匹配事件，或按「协同工单事件」（`wo_event`：拆分分派 created / 超时升级 escalated）匹配工单，或按「传播路径事件」（`prop_event`：爆发升级 outbreak / 异动激增·KOL 加入 surge）匹配传播路径，或按「外部协作事件」（`ext_event`：门户新提交 new / 监管紧急升级 escalate）匹配外部反馈门户；一条订阅可并发出推到多个渠道（Webhook/邮件/短信/站内信）
 - **通知任务**：命中订阅即按「来源事件 × 订阅 × 渠道」生成任务（**幂等键去重**，重复触发/重启补生成均不产生重复任务）；任务状态机：待发送 → 已发送 →（需回执）已回执 / 已升级；失败退避自动重试（15s×次数），达上限置「发送失败」可手动重试；待发送/失败任务可**暂停/恢复/取消**（状态守卫，暂停期间调度器跳过）
 - **调度器**：每 3 秒扫描一轮——到期任务发送/重试 + 需回执任务超时（订阅可配，分钟级）未确认**自动升级**：向升级渠道生成【升级】任务（升级链不二次升级），并写入危机时间线「通知升级」
 - **回执闭环**：确认回执（幂等，重复回执忽略）→ 同步解除关联预警触发记录（`resolve_kind=notify`，状态守卫防并发重复解除）+ 写入危机时间线「通知回执」；已结案事件不回写，保证结案档案稳定
@@ -134,6 +147,7 @@ npm run dev
 `sources` `posts`（含 `idem_key` 幂等键） `hot_words` `alerts` `alert_events`（含 `resolve_kind` 解除途径：manual/batch/close/notify） `crisis` `crisis_alerts` `crisis_timeline` `crisis_closures`（结案档案：联动解除清单、结案前状态、回滚记录） `import_jobs` `import_job_items`（可恢复导入任务与逐条记录） `notify_channels`（通知渠道） `notify_subs`（订阅编排：规则/话题/危机状态/工单事件 + 多渠道 + 回执与升级策略） `notify_tasks`（通知任务：幂等键、状态机、重试/回执/升级字段、工单来源 `work_order_id/wo_event`） `notify_logs`（历史追踪：全程留痕含操作人） `collect_sources`（数据源连接：类型/地址/入库渠道/调度策略 + 游标/连续失败计数/累计统计） `collect_runs`（采集运行记录：抓取/入库/去重/预警/建档与游标推进留痕） `work_orders`（协同工单：状态机/处理人与职能团队/SLA 截止/两级升级/阻塞挂起/处理结果/联动解除标记/来源传播路径 `prop_path_id`） `work_order_logs`（工单全程留痕：拆分/指派/认领/流转/阻塞/恢复/升级/回退/完成/取消，含操作人与职能团队） `prop_paths`（传播路径：话题/影响阶段/来源舆情/关联危机与来源预警/峰值热度/爆发与自动工单时间戳） `prop_nodes`（传播节点：首发来源/媒体/KOL/普通节点，路径内同名幂等） `prop_edges`（转发关系：from→to/互动量/触达/热度/对应舆情/幂等键） `prop_path_alerts`（路径↔预警规则多对多，含来源标记） `prop_change_logs`（传播变化留痕：建档/转发/阶段推进/关联/回落/自动工单，含操作人）；`notify_subs` 增 `prop_event`、`notify_tasks` 增 `prop_path_id`（传播事件订阅与任务来源）
 `crisis_reports`（复盘报告主表：六章节编制内容与各章节最后编辑人、聚合快照 JSON、状态机 draft/reviewing/published、当前/已发布版本号） `crisis_report_versions`（不可变版本归档：送审/发布/回滚，章节内容+聚合数据双快照、来源版本） `crisis_report_logs`（报告全程留痕：编制/送审/审核/驳回/回滚/刷新，含操作人与职能角色）；`crisis_closures` 增 `report_id/report_version/report_title`（结案档案回写已发布报告，结案回滚时撤销）
 `crisis_statements`（危机声明主表：公关起草正文/拟发布渠道/优先级，状态机 draft/review/approved/publishing/published/cancelled，起草/送审/法务审核/发起发布各环节操作人与意见，关联危机与处置工单 `work_order_id`） `crisis_statement_channels`（分渠道发布执行与结果登记：渠道/执行人/状态机 pending/publishing/success/failed/cancelled、回执结果、发布链接、失败原因、重试次数、登记人） `crisis_statement_logs`（声明全程留痕：起草/编辑/送审/通过/驳回/发起发布/逐渠道结果/重试/取消/完成，含操作人）；`work_orders` 增 `last_statement_id`（工单卡片展示最近关联声明）
+`ext_contacts`（外部协作联络方名录：品牌方/监管方/媒体机构、联系人、唯一访问码与启停） `ext_submissions`（外部提交：受理编号/提交方快照/类型 evidence·rectification·inquiry·directive/优先级/证据说明链接、状态机 pending/reviewing/approved/rejected/closed、受理人与审核人意见、官方回复、关闭信息、关联危机与回写工单、紧急升级标记） `ext_submission_logs`（内外全程留痕：提交/补充/受理/采纳/退回/回复/关闭/升级/回写工单/解除预警，operator_side 区分内外部）；`notify_subs` 增 `ext_event`（new 新提交待审 / escalate 监管紧急升级）、`notify_tasks` 增 `ext_submission_id`（外部事件通知任务来源，kind='external'）；`alert_events.resolve_kind` 新增取值 `external`（外部采纳联动解除）
 
 > 旧库自动迁移：新增 `alerts.merge_topic/merge_window`、`crisis.topic/last_trigger_at` 列，并把旧的 `crisis.alert_id` 单规则关联迁移到多对多表 `crisis_alerts`（回填话题与最近触发时间），历史时间线原样保留；新增 `posts.idem_key` 列与索引（索引在补列之后创建，更早期无该列的库也可启动），并自动重建早期版本的 `import_job_items.idem_key` 唯一约束为普通索引（支持跨任务同名幂等键）；新增 `alert_events.resolve_kind` 列与 `crisis_closures` 结案档案表，并为历史已结案事件从时间线「事件结案」记录补建结案档案（联动解除清单无法追溯置空，此类结案回滚时仅恢复事件状态）。
 

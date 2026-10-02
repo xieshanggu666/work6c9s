@@ -45,6 +45,15 @@ import {
   startPublishing, registerChannel, retryChannel, cancelChannel, cancelStatement,
   deleteStatementsOfCrisis
 } from './statements.js'
+import { generateForExternal, seedExternalNotifyTasks } from './notify.js'
+import {
+  EXT_PARTY, EXT_KIND, EXT_PRIORITY, EXT_STATUS,
+  listContacts, createContact, updateContact, toggleContact, resetContactCode, deleteContact,
+  listSubmissions, getSubmission, submissionSummary, crisisExternalBrief,
+  submitExternal, supplementExternal, publicStatus,
+  receiveSubmission, approveSubmission, rejectSubmission, replySubmission, closeSubmission,
+  bindExternalNotify, detachCrisisExternal
+} from './external.js'
 
 const app = express()
 app.use(express.json({ limit: '5mb' })) // 大批量导入（上限 5000 条）
@@ -83,6 +92,10 @@ if (seededProp) console.log(`[PROP] 为存量爆发期传播路径生成 ${seede
 // 复盘报告：为种子报告补齐聚合快照（预警/时间线/传播/工单/回执，幂等）
 const seededReportSnap = ensureSeedSnapshots()
 if (seededReportSnap) console.log(`[REPORT] 为 ${seededReportSnap} 份复盘报告补齐聚合快照`)
+// 外部协作反馈门户：注入通知联动钩子（新提交待办 / 监管紧急升级 → 通知编排），并为存量待审提交补生成通知
+bindExternalNotify({ generate: (id, event) => generateForExternal(id, event) })
+const seededExt = seedExternalNotifyTasks()
+if (seededExt) console.log(`[EXTERNAL] 为存量待审核外部提交生成 ${seededExt} 个通知任务`)
 
 // 危机列表（含来源规则、承接规则、未解除预警数、协同工单统计、时间线）
 function crisisList(withTimeline = false) {
@@ -108,6 +121,7 @@ function crisisList(withTimeline = false) {
     const item = { ...c, rules, dispatch: dispatchMap[c.id] || null }
     item.report = crisisReportBrief(c.id) // 复盘报告状态（编制中/待审核/已发布 + 当前版本）
     item.statement = crisisStatementBrief(c.id) // 最新危机声明状态（危机卡片角标）
+    item.external = crisisExternalBrief(c.id) // 外部协作受理情况（品牌/监管/媒体提交，危机卡片角标）
     if (withTimeline) item.timeline = q('SELECT * FROM crisis_timeline WHERE crisis_id=? ORDER BY id DESC', c.id)
     return item
   })
@@ -143,7 +157,11 @@ app.get('/api/state', (req, res) => {
     (SELECT COUNT(*) FROM crisis_statements WHERE status='review') stmtReview,
     (SELECT COUNT(*) FROM crisis_statements WHERE status='publishing') stmtPublishing,
     (SELECT COUNT(*) FROM crisis_statement_channels WHERE status IN ('pending','publishing')) stmtChannelOpen,
-    (SELECT COUNT(*) FROM crisis_statement_channels WHERE status='failed') stmtChannelFailed`, Date.now())
+    (SELECT COUNT(*) FROM crisis_statement_channels WHERE status='failed') stmtChannelFailed,
+    (SELECT COUNT(*) FROM ext_submissions WHERE status IN ('pending','reviewing')) extOpen,
+    (SELECT COUNT(*) FROM ext_submissions WHERE status='pending') extPending,
+    (SELECT COUNT(*) FROM ext_submissions WHERE priority='urgent' AND status IN ('pending','reviewing')) extUrgent,
+    (SELECT COUNT(*) FROM ext_submissions WHERE escalated=1 AND status IN ('pending','reviewing')) extEscalated`, Date.now())
   // 热度趋势（近7时段）
   const nowH = new Date().getHours()
   const trend = []
@@ -561,6 +579,8 @@ app.delete('/api/crisis/:id', (req, res) => {
   run('DELETE FROM work_orders WHERE crisis_id=?', req.params.id)
   // 危机声明随事件删除（分渠道登记与声明留痕一并清理）
   deleteStatementsOfCrisis(+req.params.id)
+  // 外部协作受理单保留（对外承诺与监管留痕不可删除），仅解除危机引用
+  detachCrisisExternal(+req.params.id)
   // 传播路径保留（沉淀的来源/节点/转发关系不随事件删除），仅解除危机引用
   run('UPDATE prop_paths SET crisis_id=NULL WHERE crisis_id=?', req.params.id)
   run('DELETE FROM crisis WHERE id=?', req.params.id)
@@ -754,13 +774,13 @@ app.post('/api/notify/subs', guard('admin'), (req, res) => {
   const err = validateSub(req.body)
   if (err) return res.status(400).json({ error: err })
   const b = req.body
-  run(`INSERT INTO notify_subs (name,alert_id,topic,crisis_status,levels,channel_ids,require_ack,ack_timeout_min,escalate_channel_id,max_retry,wo_event,prop_event,active,created,created_by)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,1,?,?)`,
+  run(`INSERT INTO notify_subs (name,alert_id,topic,crisis_status,levels,channel_ids,require_ack,ack_timeout_min,escalate_channel_id,max_retry,wo_event,prop_event,ext_event,active,created,created_by)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?)`,
     b.name.trim(), b.alert_id ? +b.alert_id : null, (b.topic || '').trim(), String(b.crisis_status || ''),
     (Array.isArray(b.levels) ? b.levels : []).filter((x) => ['red', 'orange', 'yellow'].includes(x)).join(','),
     JSON.stringify(b.channel_ids.map(Number)), b.require_ack ? 1 : 0,
     Math.max(1, +b.ack_timeout_min || 30), b.escalate_channel_id ? +b.escalate_channel_id : null,
-    Math.min(5, Math.max(1, +b.max_retry || 3)), String(b.wo_event || ''), String(b.prop_event || ''), now(), req.actor.user)
+    Math.min(5, Math.max(1, +b.max_retry || 3)), String(b.wo_event || ''), String(b.prop_event || ''), String(b.ext_event || ''), now(), req.actor.user)
   res.json({ ok: true })
 })
 app.put('/api/notify/subs/:id', guard('admin'), (req, res) => {
@@ -769,12 +789,12 @@ app.put('/api/notify/subs/:id', guard('admin'), (req, res) => {
   const err = validateSub(req.body)
   if (err) return res.status(400).json({ error: err })
   const b = req.body
-  run(`UPDATE notify_subs SET name=?,alert_id=?,topic=?,crisis_status=?,levels=?,channel_ids=?,require_ack=?,ack_timeout_min=?,escalate_channel_id=?,max_retry=?,wo_event=?,prop_event=? WHERE id=?`,
+  run(`UPDATE notify_subs SET name=?,alert_id=?,topic=?,crisis_status=?,levels=?,channel_ids=?,require_ack=?,ack_timeout_min=?,escalate_channel_id=?,max_retry=?,wo_event=?,prop_event=?,ext_event=? WHERE id=?`,
     b.name.trim(), b.alert_id ? +b.alert_id : null, (b.topic || '').trim(), String(b.crisis_status || ''),
     (Array.isArray(b.levels) ? b.levels : []).filter((x) => ['red', 'orange', 'yellow'].includes(x)).join(','),
     JSON.stringify(b.channel_ids.map(Number)), b.require_ack ? 1 : 0,
     Math.max(1, +b.ack_timeout_min || 30), b.escalate_channel_id ? +b.escalate_channel_id : null,
-    Math.min(5, Math.max(1, +b.max_retry || 3)), String(b.wo_event || ''), String(b.prop_event || ''), s.id)
+    Math.min(5, Math.max(1, +b.max_retry || 3)), String(b.wo_event || ''), String(b.prop_event || ''), String(b.ext_event || ''), s.id)
   res.json({ ok: true })
 })
 app.post('/api/notify/subs/:id/toggle', guard('admin'), (req, res) => {
@@ -1068,6 +1088,118 @@ app.post('/api/statement-channels/:chId/register', guard('ops'), stmtChannelActi
 app.post('/api/statement-channels/:chId/retry', guard('ops'), stmtChannelAction(retryChannel))
 // 取消单个渠道
 app.post('/api/statement-channels/:chId/cancel', guard('ops'), stmtChannelAction(cancelChannel))
+
+// ===== 外部协作反馈门户（品牌方 / 监管方 / 媒体 → 内部审核 → 回写工单·预警·危机时间线 → 通知升级） =====
+// 门户公开接口：外部凭访问码提交/补充/查询（不走平台权限守卫；受理编号+访问码即凭证）
+// 门户提交：证据/整改进度/媒体问询/监管整改通知（监管紧急件自动触发通知升级）
+app.post('/api/ext/submissions', (req, res) => {
+  const r = submitExternal(req.body || {})
+  if (r.error) return res.status(400).json({ error: r.error })
+  res.status(202).json(r)
+})
+// 门户补充材料（退回件补充后自动重新进入待审核）
+app.post('/api/ext/supplement', (req, res) => {
+  const r = supplementExternal(req.body || {})
+  if (r.error) return res.status(400).json({ error: r.error })
+  res.json(r)
+})
+// 门户状态查询：仅返回对外可见字段（状态/审核意见/官方回复/时间线），不暴露内部危机信息
+app.get('/api/ext/track', (req, res) => {
+  const r = publicStatus(String(req.query.code || ''), String(req.query.access_code || ''))
+  if (r.error) return res.status(400).json({ error: r.error })
+  res.json(r)
+})
+
+// 内部审核工作台（viewer 只读 / ops 受理·回复·关闭 / admin 同 ops 且独占审核采纳与退回）
+app.get('/api/ext/overview', (req, res) => {
+  const items = listSubmissions({
+    status: String(req.query.status || ''),
+    crisisId: req.query.crisis_id ? +req.query.crisis_id : null,
+    partyType: String(req.query.party_type || ''),
+    kind: String(req.query.kind || ''),
+    priority: String(req.query.priority || '')
+  })
+  res.json({
+    items,
+    summary: submissionSummary(),
+    dict: { status: EXT_STATUS, party: EXT_PARTY, kind: EXT_KIND, priority: EXT_PRIORITY },
+    crises: q("SELECT id,title,status,level FROM crisis WHERE status!='closed' ORDER BY id DESC"),
+    contacts: listContacts({}),
+    actor: actorOf(req)
+  })
+})
+app.get('/api/ext/submissions/:id', (req, res) => {
+  const r = getSubmission(+req.params.id)
+  if (!r) return res.status(404).json({ error: '受理单不存在' })
+  res.json(r)
+})
+// 受理（待审核 → 审核中）
+app.post('/api/ext/submissions/:id/receive', guard('ops'), (req, res) => {
+  const r = receiveSubmission(+req.params.id, req.actor)
+  if (!r) return res.status(404).json({ error: '受理单不存在' })
+  if (r.error) return res.status(400).json({ error: r.error })
+  res.json(r)
+})
+// 审核采纳（回写协同工单/预警状态/危机统一时间线；仅 admin）
+app.post('/api/ext/submissions/:id/approve', guard('admin'), (req, res) => {
+  const r = approveSubmission(+req.params.id, req.body || {}, req.actor)
+  if (!r) return res.status(404).json({ error: '受理单不存在' })
+  if (r.error) return res.status(400).json({ error: r.error })
+  res.json(r)
+})
+// 审核退回（外部可补充材料后重新提交；仅 admin）
+app.post('/api/ext/submissions/:id/reject', guard('admin'), (req, res) => {
+  const r = rejectSubmission(+req.params.id, req.body || {}, req.actor)
+  if (!r) return res.status(404).json({ error: '受理单不存在' })
+  if (r.error) return res.status(400).json({ error: r.error })
+  res.json(r)
+})
+// 官方回复（门户侧可见）
+app.post('/api/ext/submissions/:id/reply', guard('ops'), (req, res) => {
+  const r = replySubmission(+req.params.id, req.body || {}, req.actor)
+  if (!r) return res.status(404).json({ error: '受理单不存在' })
+  if (r.error) return res.status(400).json({ error: r.error })
+  res.json(r)
+})
+// 关闭受理单
+app.post('/api/ext/submissions/:id/close', guard('ops'), (req, res) => {
+  const r = closeSubmission(+req.params.id, req.body || {}, req.actor)
+  if (!r) return res.status(404).json({ error: '受理单不存在' })
+  if (r.error) return res.status(400).json({ error: r.error })
+  res.json(r)
+})
+
+// 外部联络方名录（admin 维护；viewer/ops 只读，提交表单也需读取名录）
+app.get('/api/ext/contacts', (req, res) => {
+  res.json({
+    items: listContacts({ keyword: String(req.query.q || ''), partyType: String(req.query.party_type || '') }),
+    dict: { party: EXT_PARTY }
+  })
+})
+app.post('/api/ext/contacts', guard('admin'), (req, res) => {
+  const r = createContact(req.body || {}, req.actor)
+  if (r.error) return res.status(400).json({ error: r.error })
+  res.json(r)
+})
+app.put('/api/ext/contacts/:id', guard('admin'), (req, res) => {
+  const r = updateContact(+req.params.id, req.body || {}, req.actor)
+  if (!r) return res.status(404).json({ error: '联络方不存在' })
+  res.json(r)
+})
+app.post('/api/ext/contacts/:id/toggle', guard('admin'), (req, res) => {
+  const r = toggleContact(+req.params.id)
+  if (!r) return res.status(404).json({ error: '联络方不存在' })
+  res.json(r)
+})
+app.post('/api/ext/contacts/:id/reset-code', guard('admin'), (req, res) => {
+  const r = resetContactCode(+req.params.id)
+  if (!r) return res.status(404).json({ error: '联络方不存在' })
+  res.json(r)
+})
+app.delete('/api/ext/contacts/:id', guard('admin'), (req, res) => {
+  const r = deleteContact(+req.params.id)
+  res.json(r)
+})
 
 const PORT = Number(process.env.PORT) || 4130
 app.listen(PORT, () => console.log(`[PUBMON] API running at http://localhost:${PORT}`))

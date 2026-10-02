@@ -487,6 +487,68 @@ CREATE TABLE IF NOT EXISTS crisis_statement_logs (
   time TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_stmt_logs_stmt ON crisis_statement_logs (statement_id, id);
+-- ===== 外部协作反馈门户（品牌方/监管方/媒体 → 内部审核 → 回写工单/预警/危机时间线 → 联动通知升级） =====
+-- 外部联络方名录：品牌方（加盟/供应链等关联方）、监管方（市监/药监等）、媒体；access_code 为门户提交/查询凭证
+CREATE TABLE IF NOT EXISTS ext_contacts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,                    -- 机构名称
+  party_type TEXT NOT NULL DEFAULT 'brand', -- brand 品牌方 / regulator 监管方 / media 媒体
+  contact_person TEXT NOT NULL DEFAULT '',
+  contact TEXT NOT NULL DEFAULT '',      -- 联系电话/邮箱
+  access_code TEXT NOT NULL UNIQUE,      -- 门户访问码（提交与查询凭证，可重置）
+  enabled INTEGER NOT NULL DEFAULT 1,
+  note TEXT NOT NULL DEFAULT '',
+  created TEXT NOT NULL,
+  created_by TEXT NOT NULL DEFAULT ''
+);
+-- 外部提交：证据材料 / 整改进度 / 媒体问询 / 监管整改通知；状态机 pending 待审核 → reviewing 审核中 → approved 已采纳 / rejected 已退回 / closed 已关闭
+CREATE TABLE IF NOT EXISTS ext_submissions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  code TEXT NOT NULL UNIQUE,             -- 受理编号（对外展示，EXT-YYYYMMDD-XXXX）
+  contact_id INTEGER,                    -- 关联联络方（访客直发为空）
+  party_type TEXT NOT NULL DEFAULT 'brand',
+  org_name TEXT NOT NULL DEFAULT '',     -- 提交机构/个人名称（快照）
+  contact_person TEXT NOT NULL DEFAULT '',
+  contact TEXT NOT NULL DEFAULT '',
+  crisis_id INTEGER,                     -- 关联危机事件（可空，审核采纳时回写）
+  work_order_id INTEGER,                 -- 采纳后关联/新建工单（回写锚点）
+  kind TEXT NOT NULL DEFAULT 'evidence', -- evidence 证据材料 / rectification 整改进度 / inquiry 媒体问询 / directive 监管整改通知
+  priority TEXT NOT NULL DEFAULT 'normal', -- urgent/high/normal（监管方紧急整改通知触发通知升级）
+  title TEXT NOT NULL,
+  content TEXT NOT NULL DEFAULT '',
+  evidence_desc TEXT NOT NULL DEFAULT '',-- 证据/附件说明（演示：链接/文件名/摘要，JSON 或文本）
+  evidence_url TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'pending', -- pending/reviewing/approved/rejected/closed
+  escalated INTEGER NOT NULL DEFAULT 0,   -- 是否已联动通知升级（监管紧急件）
+  notified INTEGER NOT NULL DEFAULT 0,    -- 采纳后是否已向外部回复通知
+  received_by TEXT NOT NULL DEFAULT '',   -- 受理人
+  received_at TEXT,
+  reviewed_by TEXT NOT NULL DEFAULT '',   -- 审核人（采纳/退回）
+  reviewed_at TEXT,
+  review_note TEXT NOT NULL DEFAULT '',
+  reply_note TEXT NOT NULL DEFAULT '',    -- 给外部的官方回复（公开门户可见）
+  replied_by TEXT NOT NULL DEFAULT '',
+  replied_at TEXT,
+  closed_by TEXT NOT NULL DEFAULT '',
+  closed_at TEXT,
+  close_note TEXT NOT NULL DEFAULT '',
+  created TEXT NOT NULL,
+  updated TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ext_subs_status ON ext_submissions (status, id);
+CREATE INDEX IF NOT EXISTS idx_ext_subs_crisis ON ext_submissions (crisis_id, id);
+CREATE INDEX IF NOT EXISTS idx_ext_subs_party ON ext_submissions (party_type, id);
+-- 提交全程留痕：提交/补充/受理/审核采纳/退回/官方回复/关闭（含操作人，外部动作标注 operator_side）
+CREATE TABLE IF NOT EXISTS ext_submission_logs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  submission_id INTEGER NOT NULL,
+  action TEXT NOT NULL,                  -- submit/supplement/receive/approve/reject/reply/close
+  detail TEXT NOT NULL DEFAULT '',
+  operator TEXT NOT NULL DEFAULT '系统',
+  operator_side TEXT NOT NULL DEFAULT 'internal', -- internal 内部 / external 外部
+  time TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ext_logs_sub ON ext_submission_logs (submission_id, id);
 -- 注：posts.idem_key 索引在下方 ensureColumn 之后创建（旧库可能尚无该列，此处创建会导致启动失败）
 `)
 
@@ -551,6 +613,11 @@ db.exec('CREATE INDEX IF NOT EXISTS idx_notify_tasks_corr ON notify_tasks (corr_
 db.exec('CREATE INDEX IF NOT EXISTS idx_notify_tasks_wo ON notify_tasks (work_order_id, id);')
 db.exec('CREATE INDEX IF NOT EXISTS idx_work_order_logs_task ON work_order_logs (notify_task_id);')
 db.exec('CREATE INDEX IF NOT EXISTS idx_crisis_timeline_ref ON crisis_timeline (ref_type, ref_id);')
+
+// 外部协作反馈门户扩展：通知订阅/任务支持外部提交事件（ext_event：new 新提交/待审核 / escalate 监管紧急升级 / reply 外部回复）
+ensureColumn('notify_subs', 'ext_event', "ext_event TEXT NOT NULL DEFAULT ''")
+ensureColumn('notify_tasks', 'ext_submission_id', 'ext_submission_id INTEGER')
+db.exec('CREATE INDEX IF NOT EXISTS idx_notify_tasks_ext ON notify_tasks (ext_submission_id, id);')
 
 // 历史数据回填（幂等）：为既有工单/通知任务补关联键、升级链回填与链路状态，
 // 让升级前创建的演示数据在新看板/时间线/复盘快照中同样可追踪。
@@ -1195,3 +1262,100 @@ function seedStatements() {
     .run(c2.id, '声明送审', `声明「关于预售商品发货延迟问题的说明与补偿方案」提交法务审核（提交人：李澈）`, ago(20))
 }
 seedStatements()
+
+// 外部协作反馈门户种子（独立幂等：外部联络方 + 新通知渠道/订阅 + 演示提交；提交通知任务由门户模块启动时补生成）
+function seedExternal() {
+  const hasContacts = db.prepare('SELECT COUNT(*) c FROM ext_contacts').get().c
+  const hasExtChannels = db.prepare("SELECT COUNT(*) c FROM notify_channels WHERE type='webhook' AND name LIKE '%外部协作%'").get().c
+  const nowStr = new Date().toLocaleString('zh-CN')
+  const ago = (m) => new Date(new Date().getTime() - m * 60000).toLocaleString('zh-CN')
+
+  // 外部协作专用通知渠道（门户待办/监管升级/外部回执）
+  let chExt = null, chEsc = null
+  if (!hasExtChannels) {
+    const nc = db.prepare('INSERT INTO notify_channels (name,type,target,enabled,created,created_by) VALUES (?,?,?,1,?,?)')
+    chExt = Number(nc.run('外部协作值班 Webhook', 'webhook', 'https://ops.internal/external-desk', nowStr, '系统初始化').lastInsertRowid)
+    chEsc = Number(nc.run('监管升级专线', 'webhook', 'https://ops.internal/regulator-escalation', nowStr, '系统初始化').lastInsertRowid)
+  } else {
+    chExt = db.prepare("SELECT id FROM notify_channels WHERE name='外部协作值班 Webhook'").get()?.id
+    chEsc = db.prepare("SELECT id FROM notify_channels WHERE name='监管升级专线'").get()?.id
+  }
+
+  // 外部协作订阅（ext_event：new 外部提交待审 / escalate 监管紧急升级）
+  const subCnt = db.prepare("SELECT COUNT(*) c FROM notify_subs WHERE ext_event<>''").get().c
+  if (!subCnt && chExt) {
+    const ns = db.prepare(`INSERT INTO notify_subs
+      (name,alert_id,topic,crisis_status,levels,channel_ids,require_ack,ack_timeout_min,escalate_channel_id,max_retry,wo_event,prop_event,active,created,created_by,ext_event)
+      VALUES (?,NULL,'','','',?,?,?,?,3,'','',1,?,'系统初始化',?)`)
+    // 外部提交（证据/整改进度/媒体问询/监管通知）→ 外部协作值班 Webhook
+    ns.run('外部协作提交待审核提醒', JSON.stringify([chExt]), 0, 30, null, nowStr, 'new')
+    // 监管紧急整改通知 → 值班 Webhook + 监管升级专线，需回执，1 分钟超时升级
+    ns.run('监管紧急整改通知升级', JSON.stringify([chExt, chEsc]), 1, 1, chEsc, nowStr, 'escalate')
+  }
+
+  if (hasContacts) return
+  const c1 = db.prepare("SELECT id FROM crisis WHERE title LIKE '%门店卫生%' ORDER BY id LIMIT 1").get()
+  const c2 = db.prepare("SELECT id FROM crisis WHERE title LIKE '%投诉类话题%' ORDER BY id LIMIT 1").get()
+  if (!c1 || !c2) return
+  const w1 = db.prepare("SELECT id FROM work_orders WHERE crisis_id=? AND title LIKE '%回应口径%' ORDER BY id LIMIT 1").get(c1.id)
+
+  const ci = db.prepare(`INSERT INTO ext_contacts
+    (name,party_type,contact_person,contact,access_code,enabled,note,created,created_by)
+    VALUES (?,?,?,?,?,1,?,?,?)`)
+  const ctReg = Number(ci.run('市市场监督管理局食品经营处', 'regulator', '周处', '010-12345678 / food@samr.local',
+    'REG-8801', '辖区食安监管对口处室，接收整改报告', nowStr, '系统初始化').lastInsertRowid)
+  const ctBrand = Number(ci.run('涉事门店加盟商 · 华东运营公司', 'brand', '林经理', 'lin@franchise.local',
+    'BR-2046', '涉事加盟门店主体，负责现场整改执行', nowStr, '系统初始化').lastInsertRowid)
+  const ctMedia = Number(ci.run('澎湃新闻 · 消费调查部', 'media', '吴记者', 'wu@thepaper.local',
+    'MED-6107', '暗访报道首发媒体，跟踪整改后续', nowStr, '系统初始化').lastInsertRowid)
+
+  const si = db.prepare(`INSERT INTO ext_submissions
+    (code,contact_id,party_type,org_name,contact_person,contact,crisis_id,work_order_id,kind,priority,title,content,evidence_desc,evidence_url,
+     status,escalated,notified,received_by,received_at,reviewed_by,reviewed_at,review_note,reply_note,replied_by,replied_at,closed_by,closed_at,close_note,created,updated)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+  const li = db.prepare('INSERT INTO ext_submission_logs (submission_id,action,detail,operator,operator_side,time) VALUES (?,?,?,?,?,?)')
+  const tl = db.prepare('INSERT INTO crisis_timeline (crisis_id,action,note,time,ref_type,ref_id) VALUES (?,?,?,?,?,?)')
+
+  // E1：品牌方提交整改完成证据 → 已采纳回写（工单 + 危机时间线），已官方回复并关闭
+  const e1 = Number(si.run(
+    'EXT-20261002-1001', ctBrand, 'brand', '涉事门店加盟商 · 华东运营公司', '林经理', 'lin@franchise.local',
+    c1.id, w1 ? w1.id : null, 'rectification', 'high',
+    '涉事门店整改完成情况与第三方检测报告',
+    '按总部整改要求，涉事门店已完成：1) 后厨全面消杀并更换防蝇设施；2) 全体在岗人员重新进行食安操作培训并考核通过；3) 委托第三方检测机构对食材与操作环境采样检测，结果均合格。现将整改照片、培训签到表与检测报告提交审核。',
+    '现场整改照片 12 张、培训签到表、第三方检测报告（合格）扫描件', 'https://files.internal/ext/rect-c1-report.pdf',
+    'closed', 0, 1, '李澈', ago(180), '张岚', ago(120), '整改证据齐全，第三方检测结论合格，予以采纳并回写处置工单与统一时间线。',
+    '整改材料已收悉并审核通过，感谢配合。请继续保持门店食安自查，总部将安排复查。', '张岚', ago(100), '张岚', ago(90), '整改闭环，关闭受理单', ago(300), ago(90)).lastInsertRowid)
+  li.run(e1, 'submit', '品牌方通过外部协作门户提交整改进度与证据材料', '林经理', 'external', ago(300))
+  li.run(e1, 'receive', '值班员受理，进入内部审核', '李澈', 'internal', ago(180))
+  li.run(e1, 'approve', '审核采纳：回写处置工单日志与危机统一时间线（整改完成 + 第三方检测合格）', '张岚', 'internal', ago(120))
+  li.run(e1, 'reply', '向品牌方发出官方回复：材料审核通过，安排总部复查', '张岚', 'internal', ago(100))
+  li.run(e1, 'close', '整改闭环，关闭外部协作单', '张岚', 'internal', ago(90))
+  tl.run(c1.id, '外部整改反馈', `外部协作门户 · 品牌方（涉事门店加盟商）提交整改完成证据：后厨消杀、人员重训完成，第三方检测合格（受理单 EXT-20261002-1001，审核人：张岚）`, ago(120), 'external', e1)
+  if (w1) {
+    db.prepare('INSERT INTO work_order_logs (wo_id,action,detail,operator,operator_role,time,wo_event) VALUES (?,?,?,?,?,?,?)')
+      .run(w1.id, 'external', `外部协作门户回写：品牌方提交整改完成证据（第三方检测合格，受理单 EXT-20261002-1001）`, '林经理', '', ago(120), '')
+  }
+
+  // E2：监管方下发紧急整改通知 → 待审核（演示审核采纳联动解除预警/拆工单/通知升级）
+  const e2 = Number(si.run(
+    'EXT-20261002-1002', ctReg, 'regulator', '市市场监督管理局食品经营处', '周处', '010-12345678 / food@samr.local',
+    c1.id, null, 'directive', 'urgent',
+    '关于限期完成食品安全整改并报送整改报告的通知',
+    '现就你司某加盟门店后厨卫生问题提出如下监管要求：一、立即对全部在营门店开展食品安全自查，48 小时内报送自查结果；二、涉事门店整改完成后须经第三方机构评估合格方可恢复营业；三、于 72 小时内向我处报送书面整改报告。我处将视整改情况决定是否立案与现场复查。',
+    '监管整改通知书扫描件（加盖公章）', 'https://files.internal/ext/reg-notice-1002.pdf',
+    'pending', 1, 0, '', null, '', null, '', '', '', null, '', null, '', ago(25), ago(25)).lastInsertRowid)
+  li.run(e2, 'submit', '监管方通过外部协作门户下发紧急整改通知（限期 72 小时报送整改报告）', '周处', 'external', ago(25))
+  li.run(e2, 'escalate', '监管方紧急整改通知：自动联动通知升级（监管升级专线 + 回执超时升级）', '系统', 'internal', ago(25))
+
+  // E3：媒体问询 → 审核中（演示受理流转与官方回复后关闭）
+  const e3 = Number(si.run(
+    'EXT-20261002-1003', ctMedia, 'media', '澎湃新闻 · 消费调查部', '吴记者', 'wu@thepaper.local',
+    c1.id, null, 'inquiry', 'normal',
+    '关于涉事门店整改与复业安排的采访问询',
+    '暗访报道发布后，读者关注：1) 涉事门店目前停业整改进展如何？2) 全国其他门店是否存在同类问题？3) 第三方检测结果何时公布、以何种方式公布？希望在今日 18:00 前获得官方回应，以便跟进报道。',
+    '采访提纲（3 个问题）', '',
+    'reviewing', 0, 0, '李澈', ago(60), '', null, '', '', '', null, '', null, '', ago(70), ago(55)).lastInsertRowid)
+  li.run(e3, 'submit', '媒体通过外部协作门户提交采访问询（3 个问题，期望 18:00 前回应）', '吴记者', 'external', ago(70))
+  li.run(e3, 'receive', '值班员受理，转交公关口径审核（关联处置工单）', '李澈', 'internal', ago(55))
+}
+seedExternal()

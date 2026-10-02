@@ -28,6 +28,8 @@ export const usePubStore = defineStore('pub', {
     stmtDraftCrisis: null,   // 从危机卡片/工单卡片跳转声明页：带危机预填起草
     stmtWorkOrderId: null,   // 从工单卡片跳转：起草时预关联的处置工单
     stmtOpenId: null,        // 跳转声明页时自动展开详情
+    extCrisisFilter: null,   // 从危机卡片跳转外部协作页：带危机过滤
+    extOpenId: null,         // 跳转外部协作页时自动展开受理单
     toast: null
   }),
   actions: {
@@ -297,6 +299,60 @@ export const usePubStore = defineStore('pub', {
       await this.load()
       this.msg('该渠道已取消', 'info')
       return r
-    }
+    },
+    // ===== 外部协作反馈门户（品牌方/监管方/媒体 → 内部审核 → 回写工单/预警/时间线 → 通知升级） =====
+    async fetchExternal(filter) { return await api('/ext/overview', 'GET', null, filter) },
+    async fetchExternalSubmission(id) { return await api(`/ext/submissions/${id}`) },
+    async receiveExternal(id) {
+      const r = await api(`/ext/submissions/${id}/receive`, 'POST')
+      await this.load()
+      return r
+    },
+    async approveExternal(id, body) {
+      const r = await api(`/ext/submissions/${id}/approve`, 'POST', body)
+      await this.load()
+      this.msg(`已采纳${r.createdWo ? `并拆分工单 #${r.workOrderId}` : r.workOrderId ? `并回写工单 #${r.workOrderId}` : ''}${r.resolved ? `，同步解除 ${r.resolved} 条预警` : ''}`, 'success')
+      return r
+    },
+    async rejectExternal(id, reason) {
+      const r = await api(`/ext/submissions/${id}/reject`, 'POST', { reason })
+      await this.load()
+      this.msg('已退回，外部提交方可补充材料后重新提交', 'info')
+      return r
+    },
+    async replyExternal(id, note) {
+      const r = await api(`/ext/submissions/${id}/reply`, 'POST', { note })
+      await this.load()
+      this.msg('官方回复已发出（门户侧可见）', 'success')
+      return r
+    },
+    async closeExternal(id, note) {
+      const r = await api(`/ext/submissions/${id}/close`, 'POST', { note })
+      await this.load()
+      this.msg('外部协作受理单已关闭', 'info')
+      return r
+    },
+    // 联络方名录（admin）
+    async fetchExternalContacts() { return (await api('/ext/contacts')).items },
+    async saveExternalContact(c) { const r = await api('/ext/contacts', 'POST', c); this.msg(`联络方已保存，访问码：${r.accessCode}`, 'success'); return r },
+    async updateExternalContact(id, c) { const r = await api(`/ext/contacts/${id}`, 'PUT', c); this.msg('联络方已更新', 'success'); return r },
+    async toggleExternalContact(id) { return await api(`/ext/contacts/${id}/toggle`, 'POST') },
+    async resetExternalCode(id) { const r = await api(`/ext/contacts/${id}/reset-code`, 'POST'); this.msg(`访问码已重置：${r.accessCode}`, 'success'); return r },
+    async delExternalContact(id) { await api(`/ext/contacts/${id}`, 'DELETE'); this.msg('联络方已删除（历史受理单保留）', 'info') },
+    // 门户公开接口（不带内部身份头：凭受理编号 + 访问码）
+    portalSubmit(body) { return portalFetch('/ext/submissions', 'POST', body) },
+    portalSupplement(body) { return portalFetch('/ext/supplement', 'POST', body) },
+    portalTrack(code, accessCode) { return portalFetch('/ext/track', 'GET', null, { code, access_code: accessCode }) }
   }
 })
+
+// 门户公开调用：不携带 x-user/x-role（外部品牌方/监管方/媒体视角，服务端不做平台权限校验）
+async function portalFetch(path, method = 'GET', body, qs) {
+  const url = '/api' + path + (qs ? '?' + new URLSearchParams(qs).toString() : '')
+  const opt = { method, headers: { 'Content-Type': 'application/json' } }
+  if (body) opt.body = JSON.stringify(body)
+  const r = await fetch(url, opt)
+  const data = await r.json()
+  if (!r.ok) throw Object.assign(new Error(data.error || '请求失败'), { details: data.details })
+  return data
+}
