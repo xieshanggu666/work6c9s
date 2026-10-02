@@ -487,6 +487,64 @@ CREATE TABLE IF NOT EXISTS crisis_statement_logs (
   time TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_stmt_logs_stmt ON crisis_statement_logs (statement_id, id);
+-- ===== 外部协作反馈门户 =====
+-- 外部协作方：品牌方 / 监管方 / 媒体，经口令（access_code）在门户提交证据与整改进度
+CREATE TABLE IF NOT EXISTS ext_partners (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,                   -- 机构/账号名称
+  kind TEXT NOT NULL DEFAULT 'brand',   -- brand 品牌方 / regulator 监管方 / media 媒体
+  contact TEXT NOT NULL DEFAULT '',     -- 联系人
+  phone TEXT NOT NULL DEFAULT '',       -- 联系电话
+  email TEXT NOT NULL DEFAULT '',       -- 联系邮箱
+  access_code TEXT NOT NULL UNIQUE,     -- 门户提交口令（演示用，门户身份选择器展示）
+  enabled INTEGER NOT NULL DEFAULT 1,   -- 停用后不可再提交（已提交材料保留）
+  created TEXT NOT NULL,
+  created_by TEXT NOT NULL DEFAULT ''
+);
+-- 外部提交主表：证据材料 / 整改进度，经内部审核（受理→采纳/驳回）后回写工单、预警状态与危机时间线
+CREATE TABLE IF NOT EXISTS ext_submissions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  code TEXT NOT NULL UNIQUE,            -- 门户编号 EXT-XXXX
+  partner_id INTEGER NOT NULL,
+  kind TEXT NOT NULL DEFAULT 'brand',   -- 冗余协作方类型（品牌/监管/媒体），停用/改名后仍可溯
+  crisis_id INTEGER,                    -- 关联危机事件（可空；通用线索后续可补挂）
+  work_order_id INTEGER,                -- 采纳时回写的关联处置工单（可空）
+  doc_type TEXT NOT NULL DEFAULT 'evidence', -- evidence 证据材料 / rectify 整改进度 / clue 线索反映
+  title TEXT NOT NULL,
+  content TEXT NOT NULL DEFAULT '',
+  attachments TEXT NOT NULL DEFAULT '[]', -- 附件清单 JSON：[{name,size,type}]（演示不落文件）
+  source_url TEXT NOT NULL DEFAULT '',  -- 来源链接（媒体报道链接/监管文号/品牌整改页等）
+  contact_info TEXT NOT NULL DEFAULT '',-- 提交时留的联系方式
+  is_urgent INTEGER NOT NULL DEFAULT 0, -- 紧急提交：提交即触发升级通知
+  status TEXT NOT NULL DEFAULT 'pending', -- pending 待审核 / reviewing 受理中 / accepted 已采纳 / rejected 已驳回 / withdrawn 已撤回
+  accepted_by TEXT NOT NULL DEFAULT '',
+  accepted_at TEXT,
+  accepted_note TEXT NOT NULL DEFAULT '', -- 采纳说明（写入危机时间线）
+  resolve_alerts INTEGER NOT NULL DEFAULT 0, -- 采纳时是否联动解除该危机全部未解除预警
+  resolved_alert_count INTEGER NOT NULL DEFAULT 0, -- 采纳实际联动解除的预警条数
+  rejected_by TEXT NOT NULL DEFAULT '',
+  rejected_at TEXT,
+  reject_reason TEXT NOT NULL DEFAULT '',   -- 驳回原因（外部方可在门户查看）
+  withdrawn_at TEXT,
+  reviewed_by TEXT NOT NULL DEFAULT '',  -- 受理人
+  reviewed_at TEXT,
+  created TEXT NOT NULL,
+  updated TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ext_subs_status ON ext_submissions (status, id);
+CREATE INDEX IF NOT EXISTS idx_ext_subs_crisis ON ext_submissions (crisis_id, id);
+CREATE INDEX IF NOT EXISTS idx_ext_subs_partner ON ext_submissions (partner_id, id);
+-- 外部提交操作留痕：提交/补充/受理/采纳/驳回/撤回/挂接危机/紧急升级（含操作人，内外协作全程可溯）
+CREATE TABLE IF NOT EXISTS ext_submission_logs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  submission_id INTEGER NOT NULL,
+  action TEXT NOT NULL,                 -- create/supplement/receive/accept/reject/withdraw/bind/urgent
+  detail TEXT NOT NULL DEFAULT '',
+  operator TEXT NOT NULL DEFAULT '系统',
+  operator_side TEXT NOT NULL DEFAULT '', -- internal 内部 / external 外部 / system
+  time TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ext_logs_sub ON ext_submission_logs (submission_id, id);
 -- 注：posts.idem_key 索引在下方 ensureColumn 之后创建（旧库可能尚无该列，此处创建会导致启动失败）
 `)
 
@@ -527,6 +585,9 @@ ensureColumn('work_orders', 'paused_at', 'paused_at INTEGER')
 // 传播路径分析扩展：通知订阅/任务支持传播事件（prop_event：outbreak 爆发升级 / surge 热度激增 / kol KOL 加入）
 ensureColumn('notify_subs', 'prop_event', "prop_event TEXT NOT NULL DEFAULT ''")
 ensureColumn('notify_tasks', 'prop_path_id', 'prop_path_id INTEGER')
+// 外部协作反馈门户扩展：通知订阅/任务支持门户事件（ext_event：submitted 外部提交 / escalated 紧急升级）
+ensureColumn('notify_subs', 'ext_event', "ext_event TEXT NOT NULL DEFAULT ''")
+ensureColumn('notify_tasks', 'ext_submission_id', 'ext_submission_id INTEGER')
 // 工单来源标记：传播路径爆发自动/手动生成的跨角色工单（自动工单去重与回写路径留痕用）
 ensureColumn('work_orders', 'prop_path_id', 'prop_path_id INTEGER')
 // 老库迁移：传播路径表爆发时间戳列（早期 TEXT 定义以建表语句为准，这里仅补缺失列）
@@ -1195,3 +1256,87 @@ function seedStatements() {
     .run(c2.id, '声明送审', `声明「关于预售商品发货延迟问题的说明与补偿方案」提交法务审核（提交人：李澈）`, ago(20))
 }
 seedStatements()
+
+// 外部协作反馈门户种子（独立幂等：老库升级后同样补齐协作方与演示提交）
+function seedExtPortal() {
+  const np = db.prepare('SELECT COUNT(*) c FROM ext_partners').get().c
+  const nowStr = new Date().toLocaleString('zh-CN')
+  if (np === 0) {
+    const pi = db.prepare(`INSERT INTO ext_partners (name,kind,contact,phone,email,access_code,enabled,created,created_by)
+      VALUES (?,?,?,?,?,?,1,?,?)`)
+    pi.run('某连锁品牌总部（公关部）', 'brand', '周敏', '138-0000-1001', 'pr@brand-demo.com', 'BRAND-2026', nowStr, '系统初始化')
+    pi.run('市市场监督管理局（食品经营监管科）', 'regulator', '高珂', '0571-12315', 'fda@gov-demo.cn', 'GOV-12315', nowStr, '系统初始化')
+    pi.run('澎湃新闻（民生调查部）', 'media', '林记者', '139-0000-2002', 'lin@thepaper-demo.cn', 'PRESS-PP', nowStr, '系统初始化')
+  }
+  const ns = db.prepare('SELECT COUNT(*) c FROM ext_submissions').get().c
+  if (ns === 0) {
+    const c1 = db.prepare("SELECT id FROM crisis WHERE title LIKE '%门店卫生%' ORDER BY id LIMIT 1").get()
+    const w2 = db.prepare("SELECT id FROM work_orders WHERE crisis_id=? AND title LIKE '%固定证据%' ORDER BY id LIMIT 1").get(c1 ? c1.id : -1)
+    if (!c1) return
+    const ago = (m) => new Date(new Date().getTime() - m * 60000).toLocaleString('zh-CN')
+    const brand = db.prepare("SELECT id FROM ext_partners WHERE access_code='BRAND-2026'").get()
+    const gov = db.prepare("SELECT id FROM ext_partners WHERE access_code='GOV-12315'").get()
+    const media = db.prepare("SELECT id FROM ext_partners WHERE access_code='PRESS-PP'").get()
+    const si = db.prepare(`INSERT INTO ext_submissions
+      (code,partner_id,kind,crisis_id,work_order_id,doc_type,title,content,attachments,source_url,contact_info,is_urgent,status,
+       accepted_by,accepted_at,accepted_note,resolve_alerts,resolved_alert_count,reviewed_by,reviewed_at,created,updated)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+    // E1 品牌方整改进度：已采纳，回写法务工单并联动解除（演示完整回写闭环；种子不改动既有预警状态，实际解除条数置 0）
+    const e1 = Number(si.run(
+      'EXT-1001', brand.id, 'brand', c1.id, w2 ? w2.id : null, 'rectify', '涉事门店整改进度日报（第 2 日）',
+      '一、涉事 1 家加盟店已停业整顿，后厨消杀与设备检修完成；\n二、第三方检测机构已进场采样，预计 3 个工作日出具报告；\n三、全国门店食品安全专项自查已启动，覆盖率 42%；\n四、员工操作规范再培训完成 18 场，覆盖 6 个大区。\n附整改前后对比照片与消杀记录，请审核后并入处置档案。',
+      JSON.stringify([{ name: '门店消杀记录.pdf', size: 820000, type: 'application/pdf' }, { name: '整改前后对比照片.zip', size: 3600000, type: 'application/zip' }]),
+      'https://brand-demo.com/rectify/day2', '周敏 138-0000-1001', 0, 'accepted',
+      '张岚', ago(35), '整改进度属实，已并入事件处置档案并回写法务取证工单；专项自查报告待第三日继续报送。',
+      0, 0, '李澈', ago(45), ago(80), ago(35)).lastInsertRowid)
+    if (w2) {
+      db.prepare('INSERT INTO work_order_logs (wo_id,action,detail,operator,operator_role,time) VALUES (?,?,?,?,?,?)')
+        .run(w2.id, 'ext', `外部协作门户：品牌方提交「涉事门店整改进度日报（第 2 日）」已采纳，回写工单（EXT-1001）`, '周敏（品牌方）', '', ago(35))
+    }
+    db.prepare('INSERT INTO crisis_timeline (crisis_id,action,note,time,ref_type,ref_id) VALUES (?,?,?,?,?,?)')
+      .run(c1.id, '外部反馈采纳', '采纳品牌方（某连锁品牌总部）提交的整改进度：「涉事门店整改进度日报（第 2 日）」——停业整顿与消杀完成，第三方检测进场采样，全国自查覆盖率 42%（EXT-1001）',
+        ago(35), 'ext', e1)
+    const l1 = db.prepare('INSERT INTO ext_submission_logs (submission_id,action,detail,operator,operator_side,time) VALUES (?,?,?,?,?,?)')
+    l1.run(e1, 'create', '品牌方通过外部协作门户提交整改进度（2 个附件）', '周敏', 'external', ago(80))
+    l1.run(e1, 'receive', '值班员 李澈 受理，转入内部审核', '李澈', 'internal', ago(45))
+    l1.run(e1, 'accept', '管理员 张岚 审核采纳，回写危机时间线' + (w2 ? '与法务取证工单' : '') + '（EXT-1001）', '张岚', 'internal', ago(35))
+
+    // E2 监管方督办通知：待审核，紧急（提交时已触发升级通知）
+    const e2 = Number(si.run(
+      'EXT-1002', gov.id, 'regulator', c1.id, null, 'evidence', '监管督办通知：限期提交整改情况与检测报告',
+      '我科接舆情线索后已现场核查，现要求：\n1. 48 小时内提交书面整改情况说明；\n2. 第三方检测报告出具后 2 小时内报送；\n3. 对全国加盟店食品安全管理制度开展排查并报送整改清单。\n逾期未报送将依法依规处置。',
+      JSON.stringify([{ name: '监督检查记录.pdf', size: 540000, type: 'application/pdf' }, { name: '督办通知书.pdf', size: 310000, type: 'application/pdf' }]),
+      '', '高珂 0571-12315', 1, 'pending',
+      '', null, '', 0, 0, '', null, ago(12), ago(12)).lastInsertRowid)
+    l1.run(e2, 'create', '监管方通过外部协作门户提交督办通知（紧急，2 个附件），已联动通知升级', '高珂（监管方）', 'external', ago(12))
+    l1.run(e2, 'urgent', '紧急提交：已按「外部协作升级督办」订阅生成升级通知', '系统', 'system', ago(12))
+    db.prepare('INSERT INTO crisis_timeline (crisis_id,action,note,time,ref_type,ref_id) VALUES (?,?,?,?,?,?)')
+      .run(c1.id, '外部反馈升级', '监管方（市市场监督管理局）紧急提交督办通知：限期 48 小时报送整改说明与第三方检测报告，逾期依法处置（EXT-1002）',
+        ago(12), 'ext', e2)
+
+    // E3 媒体新证据：受理中（补充采访线索，待审核）
+    const e3 = Number(si.run(
+      'EXT-1003', media.id, 'media', c1.id, null, 'evidence', '补充采访证据：另一加盟店存在同类操作问题',
+      '本报记者回访发现，同城另一家加盟店 3 日前亦被市民反映后厨地面积水、食材就地堆放，当时门店仅口头致歉。\n随附市民提供的现场视频截图与采访录音整理，供处置参考；本报将持续跟踪报道。',
+      JSON.stringify([{ name: '市民提供视频截图.png', size: 1200000, type: 'image/png' }, { name: '采访录音整理.docx', size: 96000, type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' }]),
+      'https://thepaper-demo.cn/news/followup-1', '林记者 139-0000-2002', 0, 'reviewing',
+      '', null, '', 0, 0, '李澈', ago(8), ago(20), ago(8)).lastInsertRowid)
+    l1.run(e3, 'create', '媒体（澎湃新闻）通过门户提交补充采访证据（2 个附件）', '林记者', 'external', ago(20))
+    l1.run(e3, 'receive', '值班员 李澈 受理，正在核实另一家加盟店问题', '李澈', 'internal', ago(8))
+  }
+  // 通知订阅（独立幂等：协作方/提交已存在时也补齐订阅；任务由启动流程补生成）
+  const nsub = db.prepare("SELECT COUNT(*) c FROM notify_subs WHERE ext_event!=''").get().c
+  if (nsub === 0) {
+    const ch1 = db.prepare("SELECT id FROM notify_channels WHERE name='值班 Webhook'").get()
+    const ch2 = db.prepare("SELECT id FROM notify_channels WHERE name='危机邮箱组'").get()
+    const ch4 = db.prepare("SELECT id FROM notify_channels WHERE name='升级专线'").get()
+    const ids = [ch1, ch2, ch4].filter(Boolean).map((r) => r.id)
+    const es = db.prepare(`INSERT INTO notify_subs (name,alert_id,topic,crisis_status,levels,channel_ids,require_ack,ack_timeout_min,escalate_channel_id,max_retry,active,created,created_by,ext_event)
+      VALUES (?,?,?,?,?,?,?,?,?,?,1,?,?,?)`)
+    if (ch1) es.run('外部协作提交提醒', null, '', '', '', JSON.stringify([ch1.id]), 0, 30, null, 3, nowStr, '系统初始化', 'submitted')
+    if (ch4 && ids.length) {
+      es.run('外部协作紧急升级督办', null, '', '', '', JSON.stringify([ch4.id]), 1, 1, ch4.id, 3, nowStr, '系统初始化', 'escalated')
+    }
+  }
+}
+seedExtPortal()

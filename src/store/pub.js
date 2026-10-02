@@ -2,6 +2,8 @@ import { defineStore } from 'pinia'
 
 // 当前操作身份（演示权限模型：请求头携带，服务端强制校验）
 let actor = { name: '张岚', role: 'admin' }
+// 外部协作门户身份（协作方口令；与内部权限身份相互独立，请求头 x-access-code 携带）
+let portalCode = ''
 
 async function api(path, method = 'GET', body, qs, extraHeaders) {
   const url = '/api' + path + (qs ? '?' + new URLSearchParams(qs).toString() : '')
@@ -10,6 +12,17 @@ async function api(path, method = 'GET', body, qs, extraHeaders) {
   const r = await fetch(url, opt)
   const data = await r.json()
   if (!r.ok) throw Object.assign(new Error(data.error || '请求失败'), { details: data.details })
+  return data
+}
+
+// 外部门户接口：以协作方口令鉴权
+async function portalApi(path, method = 'GET', body) {
+  const url = '/api/portal' + path
+  const opt = { method, headers: { 'Content-Type': 'application/json', 'x-access-code': portalCode } }
+  if (body) opt.body = JSON.stringify(body)
+  const r = await fetch(url, opt)
+  const data = await r.json()
+  if (!r.ok) throw Object.assign(new Error(data.error || '请求失败'), { status: r.status })
   return data
 }
 
@@ -28,6 +41,8 @@ export const usePubStore = defineStore('pub', {
     stmtDraftCrisis: null,   // 从危机卡片/工单卡片跳转声明页：带危机预填起草
     stmtWorkOrderId: null,   // 从工单卡片跳转：起草时预关联的处置工单
     stmtOpenId: null,        // 跳转声明页时自动展开详情
+    extOpenId: null,         // 从危机时间线锚点带入的待展开外部提交 id
+    extFilterCrisis: null,   // 从危机卡片跳转外部协作看板带入的危机过滤
     toast: null
   }),
   actions: {
@@ -296,6 +311,61 @@ export const usePubStore = defineStore('pub', {
       const r = await api(`/statement-channels/${chId}/cancel`, 'POST', { reason })
       await this.load()
       this.msg('该渠道已取消', 'info')
+      return r
+    },
+    // ===== 外部协作反馈门户（内部审核看板） =====
+    async fetchExtSubmissions(filter) { return await api('/ext-submissions', 'GET', null, filter) },
+    async fetchExtSubmission(id) { return (await api(`/ext-submissions/${id}`)).submission },
+    async fetchExtPartners() { return (await api('/ext-partners')).items },
+    async createExtPartner(p) {
+      await api('/ext-partners', 'POST', p)
+      this.msg('外部协作方已登记，可凭口令在门户提交', 'success')
+    },
+    async updateExtPartner(id, p) { await api(`/ext-partners/${id}`, 'PUT', p); this.msg('协作方信息已更新', 'success') },
+    async toggleExtPartner(id) { return await api(`/ext-partners/${id}/toggle`, 'POST') },
+    async receiveExt(id) {
+      const r = await api(`/ext-submissions/${id}/receive`, 'POST')
+      await this.load()
+      return r
+    },
+    async acceptExt(id, body) {
+      const r = await api(`/ext-submissions/${id}/accept`, 'POST', body)
+      await this.load()
+      this.msg(`已采纳 ${r.crisisId ? '并回写危机时间线' : ''}${r.workOrderId ? '与工单' : ''}${r.resolved ? `，联动解除 ${r.resolved} 条预警` : ''}`, 'success')
+      return r
+    },
+    async rejectExt(id, reason) {
+      const r = await api(`/ext-submissions/${id}/reject`, 'POST', { reason })
+      await this.load()
+      this.msg('已驳回，提交方可在门户查看原因并补充重提', 'info')
+      return r
+    },
+    async bindExtCrisis(id, crisis_id) {
+      const r = await api(`/ext-submissions/${id}/crisis`, 'POST', { crisis_id })
+      await this.load()
+      this.msg(crisis_id ? `已挂接危机 #${crisis_id}` : '已解除危机挂接', 'success')
+      return r
+    },
+    // ===== 外部协作门户（协作方口令鉴权） =====
+    setPortalCode(code) { portalCode = code },
+    async portalBootstrap() { return await portalApi('/bootstrap') },
+    async portalSubmit(body) {
+      const r = await portalApi('/submissions', 'POST', body)
+      await this.load()
+      this.msg(`提交成功，编号 ${r.code}${r.is_urgent || body.is_urgent ? '（已紧急升级通知内部）' : '，等待内部审核'}`, 'success')
+      return r
+    },
+    async portalFetch(id) { return (await portalApi(`/submissions/${id}`)).submission },
+    async portalSupplement(id, note) {
+      const r = await portalApi(`/submissions/${id}/supplement`, 'POST', { note })
+      await this.load()
+      this.msg('补充材料已提交', 'success')
+      return r
+    },
+    async portalWithdraw(id, reason) {
+      const r = await portalApi(`/submissions/${id}/withdraw`, 'POST', { reason })
+      await this.load()
+      this.msg('提交已撤回', 'info')
       return r
     }
   }

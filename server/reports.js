@@ -151,13 +151,37 @@ export function buildSnapshot(crisisId) {
     })
   }
 
+  // ---- 外部协作反馈：品牌方/监管方/媒体提交的证据与整改进度（含审核结论与回写口径） ----
+  const extRows = q(`SELECT s.*, p.name partner_name FROM ext_submissions s
+    LEFT JOIN ext_partners p ON p.id=s.partner_id WHERE s.crisis_id=? ORDER BY s.id ASC`, crisisId)
+  const externalFeedback = {
+    total: extRows.length,
+    accepted: extRows.filter((s) => s.status === 'accepted').length,
+    pending: extRows.filter((s) => ['pending', 'reviewing'].includes(s.status)).length,
+    rejected: extRows.filter((s) => s.status === 'rejected').length,
+    urgent: extRows.filter((s) => s.is_urgent).length,
+    resolvedAlerts: extRows.reduce((a, s) => a + (s.resolved_alert_count || 0), 0),
+    byKind: {
+      brand: extRows.filter((s) => s.kind === 'brand').length,
+      regulator: extRows.filter((s) => s.kind === 'regulator').length,
+      media: extRows.filter((s) => s.kind === 'media').length
+    },
+    items: extRows.map((s) => ({
+      id: s.id, code: s.code, kind: s.kind, partner_name: s.partner_name, doc_type: s.doc_type,
+      title: s.title, status: s.status, is_urgent: !!s.is_urgent,
+      work_order_id: s.work_order_id, resolved_alert_count: s.resolved_alert_count,
+      accepted_by: s.accepted_by, accepted_at: s.accepted_at, accepted_note: s.accepted_note,
+      rejected_by: s.rejected_by, reject_reason: s.reject_reason, created: s.created
+    }))
+  }
+
   return {
     generatedAt: now(),
     crisis: {
       id: c.id, title: c.title, level: c.level, status: c.status, topic: c.topic,
       keyword: c.keyword, origin: c.origin, created: c.created, updated: c.updated
     },
-    alerts, timeline, propagation, workOrders, notifications, closures, statements
+    alerts, timeline, propagation, workOrders, notifications, closures, statements, externalFeedback
   }
 }
 

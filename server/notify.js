@@ -51,8 +51,8 @@ function addLog(taskId, action, detail, operator = '系统') {
 }
 
 // ===== 任务生成（订阅匹配 → 多渠道并行任务；幂等键去重，重复触发不产生重复任务） =====
-// opts.kind: alert（预警）/ crisis（危机状态）/ workorder（协同工单事件）/ prop（传播路径事件）
-function createTasks(sub, { kind, alertEventId = null, crisisId = null, statusKey = '', woId = null, woEvent = '', propPathId = null, idemTag = '', corrId = '', corrSeq = 0, title, content }) {
+// opts.kind: alert（预警）/ crisis（危机状态）/ workorder（协同工单事件）/ prop（传播路径事件）/ ext（外部协作门户事件）
+function createTasks(sub, { kind, alertEventId = null, crisisId = null, statusKey = '', woId = null, woEvent = '', propPathId = null, extSubmissionId = null, idemTag = '', corrId = '', corrSeq = 0, title, content }) {
   const created = []
   const ts = now()
   for (const chId of subChannels(sub)) {
@@ -61,14 +61,15 @@ function createTasks(sub, { kind, alertEventId = null, crisisId = null, statusKe
     const src = kind === 'alert' ? `alert:${alertEventId}`
       : kind === 'workorder' ? `wo:${woId}:${idemTag || woEvent}`
       : kind === 'prop' ? `prop:${propPathId}:${idemTag}`
+      : kind === 'ext' ? `ext:${extSubmissionId}:${idemTag}`
       : `crisis:${crisisId}:${statusKey}`
     const r = run(`INSERT OR IGNORE INTO notify_tasks
-      (idem_key,sub_id,channel_id,alert_event_id,crisis_id,kind,title,content,status,attempts,max_attempts,require_ack,work_order_id,wo_event,prop_path_id,corr_id,seq,created,updated)
-      VALUES (?,?,?,?,?,?,?,?,'pending',0,?,?,?,?,?,?,?,?,?)`,
+      (idem_key,sub_id,channel_id,alert_event_id,crisis_id,kind,title,content,status,attempts,max_attempts,require_ack,work_order_id,wo_event,prop_path_id,ext_submission_id,corr_id,seq,created,updated)
+      VALUES (?,?,?,?,?,?,?,?,'pending',0,?,?,?,?,?,?,?,?,?,?)`,
       `${src}:sub${sub.id}:ch${chId}`, sub.id, chId, alertEventId, crisisId,
       kind === 'workorder' ? 'workorder' : kind, title, content,
       Math.max(1, sub.max_retry || 3), sub.require_ack ? 1 : 0, woId,
-      woEvent === '' || woEvent == null ? '' : String(woEvent), propPathId,
+      woEvent === '' || woEvent == null ? '' : String(woEvent), propPathId, extSubmissionId,
       corrId || '', corrSeq, ts, ts)
     if (Number(r.changes)) {
       const id = Number(r.lastInsertRowid)
@@ -196,6 +197,47 @@ export function seedPropNotifyTasks() {
   let n = 0
   for (const p of q("SELECT id FROM prop_paths WHERE status='active' AND stage='outbreak'")) {
     n += generateForPropEvent(p.id, 'outbreak').length
+  }
+  return n
+}
+
+// ===== 外部协作门户事件 → 通知任务（ext_event：submitted 提交到达 / escalated 紧急升级） =====
+// 复用通知渠道、失败退避重试、回执与升级调度；幂等键按 提交×事件×订阅×渠道 去重。
+export function generateForExtSubmission(subId, isUrgent = false) {
+  const s = q1(`SELECT s.*, p.name partner_name, c.title crisis_title
+    FROM ext_submissions s LEFT JOIN ext_partners p ON p.id=s.partner_id
+    LEFT JOIN crisis c ON c.id=s.crisis_id WHERE s.id=?`, subId)
+  if (!s) return []
+  // 紧急提交同时触发「升级督办」与「提交提醒」；普通提交仅触发「提交提醒」
+  const events = isUrgent ? ['escalated', 'submitted'] : ['submitted']
+  const all = []
+  for (const ev of events) {
+    const subs = q(`SELECT * FROM notify_subs WHERE active=1 AND ext_event=?`, ev)
+    if (!subs.length) continue
+    const title = ev === 'escalated'
+      ? `【外部协作·紧急升级】${s.title}`
+      : `【外部协作提交】${s.title}`
+    const kindLabel = { brand: '品牌方', regulator: '监管方', media: '媒体' }[s.kind] || '外部协作方'
+    const docLabel = { evidence: '证据材料', rectify: '整改进度', clue: '线索反映' }[s.doc_type] || '材料'
+    const bits = [`${kindLabel}（${s.partner_name || '—'}）提交${docLabel}`]
+    if (s.crisis_title) bits.push(`危机「${s.crisis_title}」`)
+    if (ev === 'escalated') bits.push('提交方标记紧急，请立即核查处置')
+    const content = bits.join(' · ') + ` · 编号 ${s.code}`
+    for (const sub of subs) {
+      all.push(...createTasks(sub, {
+        kind: 'ext', extSubmissionId: s.id, crisisId: s.crisis_id,
+        idemTag: ev, title, content
+      }))
+    }
+  }
+  return all
+}
+
+// 启动时为存量待审核紧急提交补生成升级通知（幂等：重复启动不产生重复任务）
+export function seedExtNotifyTasks() {
+  let n = 0
+  for (const s of q("SELECT id,is_urgent FROM ext_submissions WHERE status IN ('pending','reviewing') AND is_urgent=1")) {
+    n += generateForExtSubmission(s.id, true).length
   }
   return n
 }
@@ -432,7 +474,9 @@ export function validateSub(b) {
   if (we && !['created', 'escalated'].includes(we)) return '工单事件无效（created/escalated）'
   const pe = String(b.prop_event || '')
   if (pe && !['outbreak', 'surge'].includes(pe)) return '传播事件无效（outbreak/surge）'
-  if ((we && cs) || (we && pe) || (cs && pe)) return '预警/危机/工单/传播事件订阅互斥，请只选一种匹配方式'
+  const ee = String(b.ext_event || '')
+  if (ee && !['submitted', 'escalated'].includes(ee)) return '外部协作事件无效（submitted/escalated）'
+  if ([we, pe, ee, cs].filter(Boolean).length > 1) return '预警/危机/工单/传播/外部协作事件订阅互斥，请只选一种匹配方式'
   const chs = Array.isArray(b.channel_ids) ? b.channel_ids.map(Number).filter(Number.isInteger) : []
   if (!chs.length) return '至少选择一个通知渠道'
   for (const id of chs) if (!q1('SELECT 1 FROM notify_channels WHERE id=?', id)) return `渠道 #${id} 不存在`

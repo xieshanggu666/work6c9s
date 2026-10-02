@@ -24,6 +24,8 @@
       <StatementsView v-else-if="tab==='stmt'" />
       <WorkOrderView v-else-if="tab==='work'" />
       <ReportsView v-else-if="tab==='report'" />
+      <ExtPortalView v-else-if="tab==='ext'" />
+      <PartnerPortalView v-else-if="tab==='portal'" />
       <NotifyView v-else-if="tab==='notify'" />
     </main>
 
@@ -45,6 +47,8 @@ import CrisisView from '@/components/CrisisView.vue'
 import StatementsView from '@/components/StatementsView.vue'
 import WorkOrderView from '@/components/WorkOrderView.vue'
 import ReportsView from '@/components/ReportsView.vue'
+import ExtPortalView from '@/components/ExtPortalView.vue'
+import PartnerPortalView from '@/components/PartnerPortalView.vue'
 import NotifyView from '@/components/NotifyView.vue'
 
 const store = usePubStore()
@@ -60,6 +64,8 @@ const tabs = [
   { key: 'stmt', icon: '📢', label: '危机声明', badge: () => (store.stats.stmtReview || 0) + (store.stats.stmtChannelFailed || 0) },
   { key: 'work', icon: '📋', label: '协同工单', badge: () => store.stats.workOpen || 0 },
   { key: 'report', icon: '📝', label: '复盘报告', badge: () => store.stats.reportReviewing || 0 },
+  { key: 'ext', icon: '🤝', label: '外部协作', badge: () => store.stats.extPending || 0 },
+  { key: 'portal', icon: '📮', label: '协作门户' },
   { key: 'notify', icon: '🔔', label: '通知中心', badge: () => store.stats.notifyOpen || 0 }
 ]
 // 演示权限模型：admin 配置+操作（法务审核由管理员角色承担，如法务负责人陈律）/ ops 任务操作 / viewer 只读（服务端强制校验）

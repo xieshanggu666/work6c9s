@@ -42,6 +42,9 @@
           <span v-if="c.statement" class="stmt-badge" :class="c.statement.status" @click="gotoStmt(c)" title="查看危机声明">
             📢 {{ c.statement.statusText }}
           </span>
+          <span v-if="c.extPortal" class="ext-badge" :class="{urgent:c.extPortal.urgent}" @click="gotoExt(c)" title="查看外部协作反馈">
+            🤝 外部协作<template v-if="c.extPortal.open"> · 待审 {{ c.extPortal.open }}<template v-if="c.extPortal.urgent">（⚡{{ c.extPortal.urgent }}）</template></template><template v-else> · 已采纳 {{ c.extPortal.accepted }}</template>
+          </span>
           <span class="st" :class="c.status">{{ stText(c.status) }}</span>
           <button class="del" @click="del(c)">✕</button>
         </div>
@@ -72,10 +75,11 @@
           <h5>🕒 处置时间线</h5>
           <div class="tl">
             <div v-for="(t,i) in c.timeline" :key="t.id" class="tl-item">
-              <span class="tl-dot" :class="{latest:i===0, linked:t.ref_type==='workorder'}"></span>
+              <span class="tl-dot" :class="{latest:i===0, linked:['workorder','ext'].includes(t.ref_type)}"></span>
               <div class="tl-body">
                 <b>{{ t.action }}
                   <span v-if="t.ref_type==='workorder'" class="tl-link" @click.stop="openTimelineWorkOrder(t)">📋 #{{ t.ref_id }} →</span>
+                  <span v-else-if="t.ref_type==='ext'" class="tl-link ext" @click.stop="openTimelineExt(t)">🤝 {{ t.note.match(/（(EXT-\d+)）/)?.[1] || ('#'+t.ref_id) }} →</span>
                 </b>
                 <span>{{ t.note }}</span>
                 <em>{{ t.time }}</em>
@@ -224,6 +228,18 @@ function gotoReport(c) {
   store.reportDraftCrisis = c.report ? null : c.id
   store.tab = 'report'
 }
+// 跳转外部协作审核看板并按该危机过滤
+function gotoExt(c) {
+  store.extOpenId = null
+  store.extFilterCrisis = c.id
+  store.tab = 'ext'
+}
+// 从时间线锚点跳转到外部协作提交详情（自动展开留痕）
+function openTimelineExt(t) {
+  store.extFilterCrisis = t.crisis_id
+  store.extOpenId = t.ref_id
+  store.tab = 'ext'
+}
 async function reopen(c) {
   const note = prompt(`回滚结案「${c.title}」：结案时联动解除的预警将恢复为未解除，事件重回处置流程。\n回滚说明（可留空）：`)
   if (note == null) return
@@ -294,6 +310,9 @@ textarea{resize:vertical;min-height:52px;}
 .stmt-badge.publishing{background:#08303a;color:#80deea;border-color:rgba(38,198,218,.5);}
 .stmt-badge.published{background:#122e1c;color:#a5d6a7;border-color:rgba(102,187,106,.4);}
 .stmt-badge.draft{background:#263238;color:#b0bec5;border-color:rgba(120,144,156,.4);}
+.ext-badge{font-size:10px;padding:2px 8px;border-radius:6px;background:#261a3d;color:#ce93d8;border:1px solid rgba(142,36,170,.45);cursor:pointer;}
+.ext-badge.urgent{background:#3d1414;color:#ff8a80;border-color:rgba(239,83,80,.6);animation:extpulse 1.2s infinite;}
+@keyframes extpulse{50%{box-shadow:0 0 0 3px rgba(239,83,80,.18);}}
 .st{font-size:11px;padding:2px 10px;border-radius:6px;}
 .st.monitoring{background:#37474f;color:#b0bec5;}.st.disposal{background:#b71c1c;color:#ffcdd2;}.st.closed{background:#1b5e20;color:#a5d6a7;}
 .del{background:none;border:none;color:#ef5350;font-size:15px;cursor:pointer;}
@@ -318,6 +337,8 @@ h5{margin:0 0 8px;color:#ffd54f;font-size:12px;}
 .tl-dot.linked{background:#26a69a;box-shadow:0 0 0 3px rgba(38,166,154,.15);}
 .tl-link{font-size:10px;font-weight:400;color:#80cbc4;background:#0c2622;border:1px solid rgba(38,166,154,.35);border-radius:5px;padding:0 6px;margin-left:6px;cursor:pointer;}
 .tl-link:hover{background:#10433d;}
+.tl-link.ext{color:#ce93d8;background:#241636;border-color:rgba(142,36,170,.4);}
+.tl-link.ext:hover{background:#341d4d;}
 .tl-body b{color:#dbe4f3;font-size:12px;display:block;}
 .tl-body span{color:#8ba2c8;font-size:11px;}
 .tl-body em{color:#5b6f94;font-size:10px;font-style:normal;display:block;margin-top:2px;}
